@@ -1,17 +1,20 @@
 #include "renderer/Descriptors.h"
 #include "renderer/VulkanContext.h"
 #include "renderer/UniformTypes.h"
+#include "renderer/Texture.h"
 #include "Logger.h"
 
 #include <stdexcept>
+#include <array>
 
-namespace VulkanEngine {
+namespace Talos {
 
 void Descriptors::init(VulkanContext& context) {
-    createLayout(context.getDevice());
+    createGlobalLayout(context.getDevice());
+    createMaterialLayout(context.getDevice());
     createPool(context.getDevice());
     createUniformBuffers(context.getAllocator());
-    createSets(context.getDevice());
+    createGlobalSets(context.getDevice());
     LOG_INFO("Descriptors initialized");
 }
 
@@ -25,13 +28,17 @@ void Descriptors::cleanup(VkDevice device, VmaAllocator allocator) {
         vkDestroyDescriptorPool(device, m_pool, nullptr);
         m_pool = VK_NULL_HANDLE;
     }
-    if (m_layout != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(device, m_layout, nullptr);
-        m_layout = VK_NULL_HANDLE;
+    if (m_materialLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, m_materialLayout, nullptr);
+        m_materialLayout = VK_NULL_HANDLE;
+    }
+    if (m_globalLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, m_globalLayout, nullptr);
+        m_globalLayout = VK_NULL_HANDLE;
     }
 }
 
-void Descriptors::createLayout(VkDevice device) {
+void Descriptors::createGlobalLayout(VkDevice device) {
     VkDescriptorSetLayoutBinding uboBinding{};
     uboBinding.binding            = 0;
     uboBinding.descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -44,21 +51,42 @@ void Descriptors::createLayout(VkDevice device) {
     layoutInfo.bindingCount = 1;
     layoutInfo.pBindings    = &uboBinding;
 
-    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_layout) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create descriptor set layout");
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_globalLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create global descriptor set layout");
+    }
+}
+
+void Descriptors::createMaterialLayout(VkDevice device) {
+    VkDescriptorSetLayoutBinding samplerBinding{};
+    samplerBinding.binding            = 0;
+    samplerBinding.descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    samplerBinding.descriptorCount    = 1;
+    samplerBinding.stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
+    samplerBinding.pImmutableSamplers = nullptr;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings    = &samplerBinding;
+
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_materialLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create material descriptor set layout");
     }
 }
 
 void Descriptors::createPool(VkDevice device) {
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSize.descriptorCount = Renderer::MAX_FRAMES_IN_FLIGHT;
+    // Pool sizes: UBOs for global sets + samplers for material sets
+    std::array<VkDescriptorPoolSize, 2> poolSizes{};
+    poolSizes[0].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[0].descriptorCount = Renderer::MAX_FRAMES_IN_FLIGHT;
+    poolSizes[1].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[1].descriptorCount = 64; // enough for many materials
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes    = &poolSize;
-    poolInfo.maxSets       = Renderer::MAX_FRAMES_IN_FLIGHT;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolInfo.pPoolSizes    = poolSizes.data();
+    poolInfo.maxSets       = Renderer::MAX_FRAMES_IN_FLIGHT + 64;
 
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_pool) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create descriptor pool");
@@ -78,8 +106,8 @@ void Descriptors::createUniformBuffers(VmaAllocator allocator) {
     }
 }
 
-void Descriptors::createSets(VkDevice device) {
-    std::vector<VkDescriptorSetLayout> layouts(Renderer::MAX_FRAMES_IN_FLIGHT, m_layout);
+void Descriptors::createGlobalSets(VkDevice device) {
+    std::vector<VkDescriptorSetLayout> layouts(Renderer::MAX_FRAMES_IN_FLIGHT, m_globalLayout);
 
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -87,9 +115,9 @@ void Descriptors::createSets(VkDevice device) {
     allocInfo.descriptorSetCount = Renderer::MAX_FRAMES_IN_FLIGHT;
     allocInfo.pSetLayouts        = layouts.data();
 
-    m_sets.resize(Renderer::MAX_FRAMES_IN_FLIGHT);
-    if (vkAllocateDescriptorSets(device, &allocInfo, m_sets.data()) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate descriptor sets");
+    m_globalSets.resize(Renderer::MAX_FRAMES_IN_FLIGHT);
+    if (vkAllocateDescriptorSets(device, &allocInfo, m_globalSets.data()) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate global descriptor sets");
     }
 
     // Point each descriptor set at its uniform buffer
@@ -101,7 +129,7 @@ void Descriptors::createSets(VkDevice device) {
 
         VkWriteDescriptorSet descriptorWrite{};
         descriptorWrite.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet           = m_sets[i];
+        descriptorWrite.dstSet           = m_globalSets[i];
         descriptorWrite.dstBinding       = 0;
         descriptorWrite.dstArrayElement  = 0;
         descriptorWrite.descriptorType   = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -112,4 +140,35 @@ void Descriptors::createSets(VkDevice device) {
     }
 }
 
-} // namespace VulkanEngine
+VkDescriptorSet Descriptors::allocateMaterialSet(VkDevice device, Texture& texture) {
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool     = m_pool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts        = &m_materialLayout;
+
+    VkDescriptorSet set;
+    if (vkAllocateDescriptorSets(device, &allocInfo, &set) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate material descriptor set");
+    }
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageInfo.imageView   = texture.getImageView();
+    imageInfo.sampler     = texture.getSampler();
+
+    VkWriteDescriptorSet descriptorWrite{};
+    descriptorWrite.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrite.dstSet           = set;
+    descriptorWrite.dstBinding       = 0;
+    descriptorWrite.dstArrayElement  = 0;
+    descriptorWrite.descriptorType   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    descriptorWrite.descriptorCount  = 1;
+    descriptorWrite.pImageInfo       = &imageInfo;
+
+    vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+
+    return set;
+}
+
+} // namespace Talos

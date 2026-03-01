@@ -6,7 +6,7 @@
 
 #include <glm/glm.hpp>
 
-namespace VulkanEngine {
+namespace Talos {
 
 class Camera {
 public:
@@ -39,4 +39,4 @@ private:
     void updateVectors();
 };
 
-} // namespace VulkanEngine
+} // namespace Talos

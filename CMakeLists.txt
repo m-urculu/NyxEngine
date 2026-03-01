@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(VulkanEngine VERSION 0.1.0 LANGUAGES CXX)
+project(TalosEngine VERSION 0.2.0 LANGUAGES CXX)
 
 # ── C++17 standard ──────────────────────────────────────────────────────────
 set(CMAKE_CXX_STANDARD 17)
@@ -32,12 +32,24 @@ target_include_directories(vma INTERFACE external/VulkanMemoryAllocator/include)
 add_library(tinyobjloader INTERFACE)
 target_include_directories(tinyobjloader INTERFACE external/tinyobjloader)
 
+# ── stb — stb_image for texture loading (header-only) ───────────────────
+add_library(stb INTERFACE)
+target_include_directories(stb INTERFACE external/stb)
+
+# ── cgltf — glTF 2.0 parser (header-only) ───────────────────────────────
+add_library(cgltf INTERFACE)
+target_include_directories(cgltf INTERFACE external/cgltf)
+
 # ── Collect all engine source files ─────────────────────────────────────────
 set(ENGINE_SOURCES
     src/main.cpp
     src/Engine.cpp
     src/Logger.cpp
     src/Window.cpp
+    src/Input.cpp
+    src/core/Time.cpp
+    src/ecs/Registry.cpp
+    src/ecs/systems/TransformSystem.cpp
     src/renderer/VulkanContext.cpp
     src/renderer/Swapchain.cpp
     src/renderer/Pipeline.cpp
@@ -48,7 +60,11 @@ set(ENGINE_SOURCES
     src/renderer/DepthBuffer.cpp
     src/renderer/Descriptors.cpp
     src/renderer/ObjLoader.cpp
-    src/Input.cpp
+    src/renderer/StbImageUsage.cpp
+    src/renderer/Texture.cpp
+    src/renderer/CgltfUsage.cpp
+    src/renderer/GltfLoader.cpp
+    src/renderer/ResourceCache.cpp
     src/scene/Camera.cpp
 )
 
@@ -68,6 +84,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     glm
     vma
     tinyobjloader
+    stb
+    cgltf
 )
 
 # ── Enable validation layers in Debug builds ────────────────────────────────

@@ -1,22 +1,24 @@
 #include "renderer/Pipeline.h"
 #include "renderer/VulkanContext.h"
 #include "renderer/Vertex.h"
+#include "renderer/UniformTypes.h"
 #include "Logger.h"
 
 #include <fstream>
 #include <stdexcept>
 #include <array>
 
-namespace VulkanEngine {
+namespace Talos {
 
 // ════════════════════════════════════════════════════════════════════════════
 // PUBLIC
 // ════════════════════════════════════════════════════════════════════════════
 
 void Pipeline::init(VulkanContext& context, VkExtent2D swapchainExtent, VkFormat swapchainFormat,
-                     VkFormat depthFormat, VkDescriptorSetLayout descriptorSetLayout) {
+                     VkFormat depthFormat, VkDescriptorSetLayout globalLayout,
+                     VkDescriptorSetLayout materialLayout) {
     createRenderPass(context.getDevice(), swapchainFormat, depthFormat);
-    createGraphicsPipeline(context.getDevice(), swapchainExtent, descriptorSetLayout);
+    createGraphicsPipeline(context.getDevice(), swapchainExtent, globalLayout, materialLayout);
     LOG_INFO("Graphics pipeline created");
 }
 
@@ -36,10 +38,11 @@ void Pipeline::cleanup(VkDevice device) {
 }
 
 void Pipeline::recreate(VulkanContext& context, VkExtent2D swapchainExtent, VkFormat swapchainFormat,
-                         VkFormat depthFormat, VkDescriptorSetLayout descriptorSetLayout) {
+                         VkFormat depthFormat, VkDescriptorSetLayout globalLayout,
+                         VkDescriptorSetLayout materialLayout) {
     cleanup(context.getDevice());
     createRenderPass(context.getDevice(), swapchainFormat, depthFormat);
-    createGraphicsPipeline(context.getDevice(), swapchainExtent, descriptorSetLayout);
+    createGraphicsPipeline(context.getDevice(), swapchainExtent, globalLayout, materialLayout);
     LOG_INFO("Graphics pipeline recreated");
 }
 
@@ -116,7 +119,8 @@ void Pipeline::createRenderPass(VkDevice device, VkFormat swapchainFormat, VkFor
 // ════════════════════════════════════════════════════════════════════════════
 
 void Pipeline::createGraphicsPipeline(VkDevice device, VkExtent2D swapchainExtent,
-                                       VkDescriptorSetLayout descriptorSetLayout) {
+                                       VkDescriptorSetLayout globalLayout,
+                                       VkDescriptorSetLayout materialLayout) {
     // ── Load compiled shaders ──────────────────────────────────────────────
     auto vertCode = readShaderFile("shaders/mesh.vert.spv");
     auto fragCode = readShaderFile("shaders/mesh.frag.spv");
@@ -213,11 +217,21 @@ void Pipeline::createGraphicsPipeline(VkDevice device, VkExtent2D swapchainExten
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable     = VK_FALSE;
 
-    // ── Pipeline layout ────────────────────────────────────────────────────
+    // ── Push constants (per-object model + normalMatrix) ────────────────
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushConstantRange.offset     = 0;
+    pushConstantRange.size       = sizeof(PushConstants);
+
+    // ── Pipeline layout (2 descriptor set layouts + push constants) ─────
+    std::array<VkDescriptorSetLayout, 2> setLayouts = { globalLayout, materialLayout };
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-    pipelineLayoutInfo.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts    = &descriptorSetLayout;
+    pipelineLayoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount         = static_cast<uint32_t>(setLayouts.size());
+    pipelineLayoutInfo.pSetLayouts            = setLayouts.data();
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges    = &pushConstantRange;
 
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create pipeline layout");
@@ -282,4 +296,4 @@ VkShaderModule Pipeline::createShaderModule(VkDevice device, const std::vector<c
     return shaderModule;
 }
 
-} // namespace VulkanEngine
+} // namespace Talos

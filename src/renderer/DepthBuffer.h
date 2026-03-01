@@ -6,7 +6,7 @@
 #include <vk_mem_alloc.h>
 #include <vector>
 
-namespace VulkanEngine {
+namespace Talos {
 
 class VulkanContext;
 
@@ -32,4 +32,4 @@ private:
                                          VkFormatFeatureFlags features);
 };
 
-} // namespace VulkanEngine
+} // namespace Talos

@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <limits>
 
-namespace VulkanEngine {
+namespace Talos {
 
 // ════════════════════════════════════════════════════════════════════════════
 // PUBLIC
@@ -172,4 +172,4 @@ VkExtent2D Swapchain::chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilit
     return actualExtent;
 }
 
-} // namespace VulkanEngine
+} // namespace Talos

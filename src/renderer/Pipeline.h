@@ -6,18 +6,20 @@
 #include <string>
 #include <vector>
 
-namespace VulkanEngine {
+namespace Talos {
 
 class VulkanContext;
 
 class Pipeline {
 public:
     void init(VulkanContext& context, VkExtent2D swapchainExtent, VkFormat swapchainFormat,
-              VkFormat depthFormat, VkDescriptorSetLayout descriptorSetLayout);
+              VkFormat depthFormat, VkDescriptorSetLayout globalLayout,
+              VkDescriptorSetLayout materialLayout);
     void cleanup(VkDevice device);
 
     void recreate(VulkanContext& context, VkExtent2D swapchainExtent, VkFormat swapchainFormat,
-                  VkFormat depthFormat, VkDescriptorSetLayout descriptorSetLayout);
+                  VkFormat depthFormat, VkDescriptorSetLayout globalLayout,
+                  VkDescriptorSetLayout materialLayout);
 
     VkRenderPass     getRenderPass()     const { return m_renderPass; }
     VkPipeline       getPipeline()       const { return m_pipeline; }
@@ -30,10 +32,11 @@ private:
 
     void createRenderPass(VkDevice device, VkFormat swapchainFormat, VkFormat depthFormat);
     void createGraphicsPipeline(VkDevice device, VkExtent2D swapchainExtent,
-                                VkDescriptorSetLayout descriptorSetLayout);
+                                VkDescriptorSetLayout globalLayout,
+                                VkDescriptorSetLayout materialLayout);
 
     static std::vector<char> readShaderFile(const std::string& filepath);
     VkShaderModule createShaderModule(VkDevice device, const std::vector<char>& code);
 };
 
-} // namespace VulkanEngine
+} // namespace Talos

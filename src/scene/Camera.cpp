@@ -5,7 +5,7 @@
 #include <GLFW/glfw3.h>
 #include <algorithm>
 
-namespace VulkanEngine {
+namespace Talos {
 
 void Camera::init(glm::vec3 position, float aspectRatio) {
     m_position = position;
@@ -63,4 +63,4 @@ void Camera::updateVectors() {
     m_up    = glm::normalize(glm::cross(m_right, m_front));
 }
 
-} // namespace VulkanEngine
+} // namespace Talos

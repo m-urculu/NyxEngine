@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <stdexcept>
 
-namespace VulkanEngine {
+namespace Talos {
 
 bool ObjLoader::load(const std::string& filepath,
                      std::vector<Vertex>& outVertices,
@@ -65,6 +65,16 @@ bool ObjLoader::load(const std::string& filepath,
                 vertex.color = defaultColor;
             }
 
+            // Texcoord
+            if (index.texcoord_index >= 0) {
+                vertex.texCoord = {
+                    attrib.texcoords[2 * index.texcoord_index + 0],
+                    1.0f - attrib.texcoords[2 * index.texcoord_index + 1] // flip V for Vulkan
+                };
+            } else {
+                vertex.texCoord = {0.0f, 0.0f};
+            }
+
             // Vertex deduplication
             if (uniqueVertices.count(vertex) == 0) {
                 uniqueVertices[vertex] = static_cast<uint32_t>(outVertices.size());
@@ -79,4 +89,4 @@ bool ObjLoader::load(const std::string& filepath,
     return true;
 }
 
-} // namespace VulkanEngine
+} // namespace Talos

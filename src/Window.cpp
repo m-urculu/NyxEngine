@@ -2,7 +2,7 @@
 #include "Logger.h"
 #include <stdexcept>
 
-namespace VulkanEngine {
+namespace Talos {
 
 Window::Window(const std::string& title, int width, int height)
     : m_width(width), m_height(height)
@@ -61,4 +61,4 @@ void Window::framebufferResizeCallback(GLFWwindow* window, int width, int height
     LOG_INFO("Window resized: {}x{}", width, height);
 }
 
-} // namespace VulkanEngine
+} // namespace Talos

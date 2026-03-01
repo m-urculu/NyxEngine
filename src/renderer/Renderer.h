@@ -5,13 +5,14 @@
 #include <vulkan/vulkan.h>
 #include <vector>
 
-namespace VulkanEngine {
+namespace Talos {
 
 class VulkanContext;
 class Swapchain;
 class Pipeline;
 class Mesh;
 class Descriptors;
+class Registry;
 
 class Renderer {
 public:
@@ -21,7 +22,7 @@ public:
     void cleanup(VkDevice device);
 
     bool drawFrame(VulkanContext& context, Swapchain& swapchain, Pipeline& pipeline,
-                    Mesh& mesh, Descriptors& descriptors);
+                    Registry& registry, Descriptors& descriptors);
 
     void recreateFramebuffers(VkDevice device, Swapchain& swapchain, Pipeline& pipeline);
 
@@ -48,8 +49,8 @@ private:
     void createSyncObjects(VkDevice device, uint32_t imageCount);
 
     void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex,
-                             Swapchain& swapchain, Pipeline& pipeline, Mesh& mesh,
-                             Descriptors& descriptors);
+                             Swapchain& swapchain, Pipeline& pipeline,
+                             Registry& registry, Descriptors& descriptors);
 };
 
-} // namespace VulkanEngine
+} // namespace Talos

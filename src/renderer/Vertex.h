@@ -2,8 +2,8 @@
 
 // Vertex.h — Vertex format definition
 //
-// Each vertex has: position (vec3), normal (vec3), color (vec3)
-// Total: 36 bytes per vertex.
+// Each vertex has: position (vec3), normal (vec3), color (vec3), texCoord (vec2)
+// Total: 44 bytes per vertex.
 
 #include <vulkan/vulkan.h>
 #define GLM_ENABLE_EXPERIMENTAL
@@ -12,17 +12,19 @@
 #include <array>
 #include <functional>
 
-namespace VulkanEngine {
+namespace Talos {
 
 struct Vertex {
     glm::vec3 position;
     glm::vec3 normal;
     glm::vec3 color;
+    glm::vec2 texCoord;
 
     bool operator==(const Vertex& other) const {
         return position == other.position &&
                normal   == other.normal &&
-               color    == other.color;
+               color    == other.color &&
+               texCoord == other.texCoord;
     }
 
     static VkVertexInputBindingDescription getBindingDescription() {
@@ -33,8 +35,8 @@ struct Vertex {
         return binding;
     }
 
-    static std::array<VkVertexInputAttributeDescription, 3> getAttributeDescriptions() {
-        std::array<VkVertexInputAttributeDescription, 3> attrs{};
+    static std::array<VkVertexInputAttributeDescription, 4> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 4> attrs{};
 
         attrs[0].binding  = 0;
         attrs[0].location = 0;
@@ -51,20 +53,26 @@ struct Vertex {
         attrs[2].format   = VK_FORMAT_R32G32B32_SFLOAT;
         attrs[2].offset   = offsetof(Vertex, color);
 
+        attrs[3].binding  = 0;
+        attrs[3].location = 3;
+        attrs[3].format   = VK_FORMAT_R32G32_SFLOAT;
+        attrs[3].offset   = offsetof(Vertex, texCoord);
+
         return attrs;
     }
 };
 
-} // namespace VulkanEngine
+} // namespace Talos
 
 // Hash specialization for vertex deduplication
 namespace std {
-    template<> struct hash<VulkanEngine::Vertex> {
-        size_t operator()(const VulkanEngine::Vertex& v) const {
+    template<> struct hash<Talos::Vertex> {
+        size_t operator()(const Talos::Vertex& v) const {
             size_t h = 0;
             h ^= hash<glm::vec3>()(v.position);
-            h ^= hash<glm::vec3>()(v.normal)   << 1;
-            h ^= hash<glm::vec3>()(v.color)    << 2;
+            h ^= hash<glm::vec3>()(v.normal)    << 1;
+            h ^= hash<glm::vec3>()(v.color)     << 2;
+            h ^= hash<glm::vec2>()(v.texCoord)  << 3;
             return h;
         }
     };

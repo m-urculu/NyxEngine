@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <cstring>
 
-namespace VulkanEngine {
+namespace Talos {
 
 void Buffer::init(VmaAllocator allocator, VkDeviceSize size,
                   VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage) {
@@ -52,4 +52,4 @@ void Buffer::copyBuffer(VulkanContext& context, VkBuffer srcBuffer,
     context.endSingleTimeCommands(commandBuffer);
 }
 
-} // namespace VulkanEngine
+} // namespace Talos

@@ -1,26 +1,31 @@
 #pragma once
 
-// UniformTypes.h — UBO struct for MVP matrices + lighting data
+// UniformTypes.h — UBO struct for global data + push constants for per-object data
 //
-// Single combined UBO at set 0, binding 0.
-// Layout matches std140 alignment rules.
+// Set 0, binding 0: Global UBO (view/proj + lighting)
+// Push constants: Per-object model + normalMatrix (128 bytes)
 
 #include <glm/glm.hpp>
 
-namespace VulkanEngine {
+namespace Talos {
 
+// Global data shared across all draws — set 0, binding 0
 struct UniformBufferObject {
-    // Matrices (4 x mat4 = 256 bytes)
-    glm::mat4 model;
+    // Matrices (128 bytes)
     glm::mat4 view;
     glm::mat4 projection;
-    glm::mat4 normalMatrix;   // inverse transpose of model (as mat4 for alignment)
 
-    // Lighting (4 x vec4 = 64 bytes)
+    // Lighting (64 bytes)
     glm::vec4 lightDirection; // xyz = direction, w unused
     glm::vec4 lightColor;     // xyz = color, w = intensity
     glm::vec4 ambientColor;   // xyz = color, w = intensity
     glm::vec4 cameraPosition; // xyz = position, w unused
 };
 
-} // namespace VulkanEngine
+// Per-object data pushed per draw call — 128 bytes
+struct PushConstants {
+    glm::mat4 model;        // 64 bytes
+    glm::mat4 normalMatrix; // 64 bytes
+};
+
+} // namespace Talos

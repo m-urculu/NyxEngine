@@ -4,7 +4,7 @@
 
 #include <GLFW/glfw3.h>
 
-namespace VulkanEngine {
+namespace Talos {
 
 class Input {
 public:
@@ -30,4 +30,4 @@ private:
     static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
 };
 
-} // namespace VulkanEngine
+} // namespace Talos

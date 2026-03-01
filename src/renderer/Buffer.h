@@ -9,7 +9,7 @@
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 
-namespace VulkanEngine {
+namespace Talos {
 
 class VulkanContext;
 
@@ -35,4 +35,4 @@ private:
     VkDeviceSize   m_size       = 0;
 };
 
-} // namespace VulkanEngine
+} // namespace Talos

@@ -9,7 +9,7 @@
 #include "renderer/Vertex.h"
 #include <vector>
 
-namespace VulkanEngine {
+namespace Talos {
 
 class VulkanContext;
 
@@ -29,4 +29,4 @@ private:
     uint32_t m_indexCount = 0;
 };
 
-} // namespace VulkanEngine
+} // namespace Talos

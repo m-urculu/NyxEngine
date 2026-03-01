@@ -4,7 +4,7 @@
 
 #include <stdexcept>
 
-namespace VulkanEngine {
+namespace Talos {
 
 void Mesh::init(VulkanContext& context, const std::vector<Vertex>& vertices,
                 const std::vector<uint32_t>& indices) {
@@ -59,4 +59,4 @@ void Mesh::draw(VkCommandBuffer commandBuffer) const {
     vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
 }
 
-} // namespace VulkanEngine
+} // namespace Talos

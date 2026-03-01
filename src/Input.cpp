@@ -1,7 +1,7 @@
 #include "Input.h"
 #include "Logger.h"
 
-namespace VulkanEngine {
+namespace Talos {
 
 GLFWwindow* Input::s_window       = nullptr;
 double      Input::s_lastMouseX   = 0.0;
@@ -75,4 +75,4 @@ void Input::keyCallback(GLFWwindow* window, int key, [[maybe_unused]] int scanco
     }
 }
 
-} // namespace VulkanEngine
+} // namespace Talos

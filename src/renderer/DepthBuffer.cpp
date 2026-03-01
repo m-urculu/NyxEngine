@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace VulkanEngine {
+namespace Talos {
 
 void DepthBuffer::init(VulkanContext& context, VkExtent2D extent) {
     m_format = findDepthFormat(context.getPhysicalDevice());
@@ -94,4 +94,4 @@ VkFormat DepthBuffer::findSupportedFormat(VkPhysicalDevice physicalDevice,
     throw std::runtime_error("Failed to find supported depth format");
 }
 
-} // namespace VulkanEngine
+} // namespace Talos

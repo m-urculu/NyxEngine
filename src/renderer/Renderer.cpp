@@ -5,12 +5,18 @@
 #include "renderer/Mesh.h"
 #include "renderer/Descriptors.h"
 #include "renderer/DepthBuffer.h"
+#include "renderer/UniformTypes.h"
+#include "ecs/Registry.h"
+#include "ecs/components/TransformComponent.h"
+#include "ecs/components/MeshComponent.h"
+#include "ecs/components/MaterialComponent.h"
 #include "Logger.h"
 
+#include <glm/gtc/matrix_inverse.hpp>
 #include <stdexcept>
 #include <array>
 
-namespace VulkanEngine {
+namespace Talos {
 
 // ════════════════════════════════════════════════════════════════════════════
 // PUBLIC
@@ -74,7 +80,7 @@ void Renderer::waitIdle(VkDevice device) {
 // ════════════════════════════════════════════════════════════════════════════
 
 bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain,
-                          Pipeline& pipeline, Mesh& mesh, Descriptors& descriptors) {
+                          Pipeline& pipeline, Registry& registry, Descriptors& descriptors) {
     VkDevice device = context.getDevice();
 
     vkWaitForFences(device, 1, &m_inFlightFences[m_currentFrame],
@@ -100,7 +106,7 @@ bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain,
     vkResetFences(device, 1, &m_inFlightFences[m_currentFrame]);
 
     vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
-    recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, swapchain, pipeline, mesh, descriptors);
+    recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, swapchain, pipeline, registry, descriptors);
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -234,8 +240,8 @@ void Renderer::createSyncObjects(VkDevice device, uint32_t imageCount) {
 // ════════════════════════════════════════════════════════════════════════════
 
 void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex,
-                                    Swapchain& swapchain, Pipeline& pipeline, Mesh& mesh,
-                                    Descriptors& descriptors) {
+                                    Swapchain& swapchain, Pipeline& pipeline,
+                                    Registry& registry, Descriptors& descriptors) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
@@ -260,11 +266,42 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.getPipeline());
 
-    VkDescriptorSet descSet = descriptors.getSet(m_currentFrame);
+    // Bind global descriptor set (set 0) once
+    VkDescriptorSet globalSet = descriptors.getSet(m_currentFrame);
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipeline.getPipelineLayout(), 0, 1, &descSet, 0, nullptr);
+                            pipeline.getPipelineLayout(), 0, 1, &globalSet, 0, nullptr);
 
-    mesh.draw(commandBuffer);
+    // Iterate all entities with Transform + Mesh, push constants per draw
+    auto& meshPool = registry.pool<MeshComponent>();
+    for (size_t i = 0; i < meshPool.size(); i++) {
+        Entity entity = meshPool.getEntity(i);
+        const MeshComponent& mc = meshPool[i];
+
+        if (!mc.mesh) continue;
+        if (!registry.has<TransformComponent>(entity)) continue;
+
+        const TransformComponent& tc = registry.get<TransformComponent>(entity);
+
+        // Push per-object model + normalMatrix
+        PushConstants pc{};
+        pc.model        = tc.worldMatrix;
+        pc.normalMatrix = glm::transpose(glm::inverse(tc.worldMatrix));
+
+        vkCmdPushConstants(commandBuffer, pipeline.getPipelineLayout(),
+                           VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
+
+        // Bind per-material descriptor set (set 1) if entity has MaterialComponent
+        if (registry.has<MaterialComponent>(entity)) {
+            const MaterialComponent& mat = registry.get<MaterialComponent>(entity);
+            if (mat.descriptorSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        pipeline.getPipelineLayout(), 1, 1,
+                                        &mat.descriptorSet, 0, nullptr);
+            }
+        }
+
+        mc.mesh->draw(commandBuffer);
+    }
 
     vkCmdEndRenderPass(commandBuffer);
 
@@ -273,4 +310,4 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
     }
 }
 
-} // namespace VulkanEngine
+} // namespace Talos

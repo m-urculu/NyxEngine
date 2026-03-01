@@ -1,19 +1,21 @@
 #pragma once
 
-// Engine.h — Main engine class
+// Engine.h — Main engine class with ECS, fixed timestep, and resource management
 
 #include "Window.h"
 #include "renderer/VulkanContext.h"
 #include "renderer/Swapchain.h"
 #include "renderer/Pipeline.h"
 #include "renderer/Renderer.h"
-#include "renderer/Mesh.h"
 #include "renderer/Descriptors.h"
+#include "renderer/ResourceCache.h"
 #include "scene/Camera.h"
+#include "core/Time.h"
+#include "ecs/Registry.h"
 
 #include <memory>
 
-namespace VulkanEngine {
+namespace Talos {
 
 class Engine {
 public:
@@ -33,14 +35,25 @@ private:
     Descriptors              m_descriptors;
     Pipeline                 m_pipeline;
     Renderer                 m_renderer;
-    Mesh                     m_mesh;
+    ResourceCache            m_resourceCache;
     Camera                   m_camera;
+    Time                     m_time;
+    Registry                 m_registry;
 
-    float m_lastFrameTime = 0.0f;
+    // Orbiting child entity for demo
+    Entity m_orbitEntity = NULL_ENTITY;
+    float  m_orbitAngle  = 0.0f;
 
     void handleResize();
-    void createCubeMesh();
+    void fixedUpdate(float dt);
     void updateUniformBuffer(uint32_t currentFrame);
+    void buildDemoScene();
+    void loadGltfScene(const std::string& filepath);
+
+    // Helper to create an entity with Transform + Mesh + Material (default texture)
+    Entity createMeshEntity(Mesh* mesh, Texture* texture,
+                            const glm::vec3& position = {0,0,0},
+                            const glm::vec3& scale = {1,1,1});
 };
 
-} // namespace VulkanEngine
+} // namespace Talos

@@ -12,7 +12,7 @@
 #include <string>
 #include <functional>
 
-namespace VulkanEngine {
+namespace Talos {
 
 class Window {
 public:
@@ -51,4 +51,4 @@ private:
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
 };
 
-} // namespace VulkanEngine
+} // namespace Talos

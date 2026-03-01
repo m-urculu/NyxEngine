@@ -1,4 +1,4 @@
-// main.cpp — Entry point for VulkanEngine
+// main.cpp — Entry point for Talos
 //
 // This is where the program starts. It creates the engine,
 // initializes everything, runs the game loop, and handles errors.
@@ -11,7 +11,7 @@
 
 int main() {
     try {
-        VulkanEngine::Engine engine;
+        Talos::Engine engine;
         engine.init();
         engine.run();
     } catch (const std::exception& e) {
