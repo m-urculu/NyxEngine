@@ -93,15 +93,28 @@ std::vector<GltfMeshData> GltfLoader::load(const std::string& filepath) {
                 }
             }
 
-            // Base color texture URI
-            if (prim.material &&
-                prim.material->has_pbr_metallic_roughness &&
-                prim.material->pbr_metallic_roughness.base_color_texture.texture &&
-                prim.material->pbr_metallic_roughness.base_color_texture.texture->image) {
-                const cgltf_image* img = prim.material->pbr_metallic_roughness.base_color_texture.texture->image;
-                if (img->uri) {
-                    meshData.baseColorTextureURI = img->uri;
+            // Material properties
+            if (prim.material && prim.material->has_pbr_metallic_roughness) {
+                const auto& pbr = prim.material->pbr_metallic_roughness;
+
+                // Base color texture URI
+                if (pbr.base_color_texture.texture &&
+                    pbr.base_color_texture.texture->image) {
+                    const cgltf_image* img = pbr.base_color_texture.texture->image;
+                    if (img->uri) {
+                        meshData.baseColorTextureURI = img->uri;
+                    }
                 }
+
+                // PBR factors
+                meshData.baseColorFactor = {
+                    pbr.base_color_factor[0],
+                    pbr.base_color_factor[1],
+                    pbr.base_color_factor[2],
+                    pbr.base_color_factor[3]
+                };
+                meshData.metallicFactor  = pbr.metallic_factor;
+                meshData.roughnessFactor = pbr.roughness_factor;
             }
 
             LOG_INFO("glTF mesh '{}' prim {}: {} vertices, {} indices, texture: {}",

@@ -44,16 +44,24 @@ private:
     Entity m_orbitEntity = NULL_ENTITY;
     float  m_orbitAngle  = 0.0f;
 
+    // Light entities
+    Entity m_sunEntity        = NULL_ENTITY;
+    Entity m_pointLightEntity = NULL_ENTITY;
+    Entity m_pointLightEntity2 = NULL_ENTITY;
+
     void handleResize();
     void fixedUpdate(float dt);
     void updateUniformBuffer(uint32_t currentFrame);
     void buildDemoScene();
     void loadGltfScene(const std::string& filepath);
 
-    // Helper to create an entity with Transform + Mesh + Material (default texture)
+    // Helper to create an entity with Transform + Mesh + Material
     Entity createMeshEntity(Mesh* mesh, Texture* texture,
                             const glm::vec3& position = {0,0,0},
-                            const glm::vec3& scale = {1,1,1});
+                            const glm::vec3& scale = {1,1,1},
+                            const glm::vec4& baseColorFactor = {1,1,1,1},
+                            float metallic = 0.0f,
+                            float roughness = 0.5f);
 };
 
 } // namespace Talos

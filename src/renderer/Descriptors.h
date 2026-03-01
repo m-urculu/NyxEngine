@@ -3,7 +3,7 @@
 // Descriptors.h — Descriptor set layouts, pools, sets, and uniform buffers
 //
 // Set 0: Global UBO (view/proj + lighting) — one per frame in flight
-// Set 1: Per-material texture (combined image sampler) — allocated on demand
+// Set 1: Per-material (binding 0 = texture sampler, binding 1 = material UBO)
 
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
@@ -15,6 +15,7 @@ namespace Talos {
 
 class VulkanContext;
 class Texture;
+struct MaterialParams;
 
 class Descriptors {
 public:
@@ -30,8 +31,9 @@ public:
     VkDescriptorSet getSet(uint32_t frameIndex) const { return m_globalSets[frameIndex]; }
     Buffer& getUniformBuffer(uint32_t frameIndex) { return m_uniformBuffers[frameIndex]; }
 
-    // Allocate a material descriptor set bound to a texture
-    VkDescriptorSet allocateMaterialSet(VkDevice device, Texture& texture);
+    // Allocate a material descriptor set bound to a texture + material UBO
+    VkDescriptorSet allocateMaterialSet(VkDevice device, VmaAllocator allocator,
+                                        Texture& texture, const MaterialParams& params);
 
 private:
     // Global (set 0)
@@ -41,6 +43,7 @@ private:
 
     // Material (set 1)
     VkDescriptorSetLayout m_materialLayout = VK_NULL_HANDLE;
+    std::vector<Buffer>   m_materialUBOs; // one per allocated material set
 
     // Shared pool for both global and material sets
     VkDescriptorPool m_pool = VK_NULL_HANDLE;

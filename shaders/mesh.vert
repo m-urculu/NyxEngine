@@ -6,14 +6,21 @@ layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec3 inColor;
 layout(location = 3) in vec2 inTexCoord;
 
-// Global UBO
+// Light data struct (must match C++ GpuLightData, 48 bytes)
+struct GpuLightData {
+    vec4 positionAndType;
+    vec4 colorAndIntensity;
+    vec4 params;
+};
+
+// Global UBO — layout must match C++ UniformBufferObject exactly
 layout(set = 0, binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 projection;
-    vec4 lightDirection;
-    vec4 lightColor;
     vec4 ambientColor;
     vec4 cameraPosition;
+    GpuLightData lights[8];
+    ivec4 lightCountAndPad;
 } ubo;
 
 // Per-object push constants

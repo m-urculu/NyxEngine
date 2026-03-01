@@ -19,6 +19,11 @@ void Descriptors::init(VulkanContext& context) {
 }
 
 void Descriptors::cleanup(VkDevice device, VmaAllocator allocator) {
+    for (auto& buf : m_materialUBOs) {
+        buf.cleanup(allocator);
+    }
+    m_materialUBOs.clear();
+
     for (auto& buf : m_uniformBuffers) {
         buf.cleanup(allocator);
     }
@@ -57,17 +62,26 @@ void Descriptors::createGlobalLayout(VkDevice device) {
 }
 
 void Descriptors::createMaterialLayout(VkDevice device) {
-    VkDescriptorSetLayoutBinding samplerBinding{};
-    samplerBinding.binding            = 0;
-    samplerBinding.descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    samplerBinding.descriptorCount    = 1;
-    samplerBinding.stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
-    samplerBinding.pImmutableSamplers = nullptr;
+    std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+
+    // Binding 0: combined image sampler (texture)
+    bindings[0].binding            = 0;
+    bindings[0].descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[0].descriptorCount    = 1;
+    bindings[0].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[0].pImmutableSamplers = nullptr;
+
+    // Binding 1: uniform buffer (material params)
+    bindings[1].binding            = 1;
+    bindings[1].descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[1].descriptorCount    = 1;
+    bindings[1].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[1].pImmutableSamplers = nullptr;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings    = &samplerBinding;
+    layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+    layoutInfo.pBindings    = bindings.data();
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_materialLayout) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create material descriptor set layout");
@@ -75,10 +89,10 @@ void Descriptors::createMaterialLayout(VkDevice device) {
 }
 
 void Descriptors::createPool(VkDevice device) {
-    // Pool sizes: UBOs for global sets + samplers for material sets
+    // Pool sizes: UBOs for global sets + material UBOs, samplers for material sets
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSizes[0].descriptorCount = Renderer::MAX_FRAMES_IN_FLIGHT;
+    poolSizes[0].descriptorCount = Renderer::MAX_FRAMES_IN_FLIGHT + 64; // global + material UBOs
     poolSizes[1].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[1].descriptorCount = 64; // enough for many materials
 
@@ -140,7 +154,8 @@ void Descriptors::createGlobalSets(VkDevice device) {
     }
 }
 
-VkDescriptorSet Descriptors::allocateMaterialSet(VkDevice device, Texture& texture) {
+VkDescriptorSet Descriptors::allocateMaterialSet(VkDevice device, VmaAllocator allocator,
+                                                  Texture& texture, const MaterialParams& params) {
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool     = m_pool;
@@ -152,21 +167,47 @@ VkDescriptorSet Descriptors::allocateMaterialSet(VkDevice device, Texture& textu
         throw std::runtime_error("Failed to allocate material descriptor set");
     }
 
+    // Create per-material UBO and upload params
+    m_materialUBOs.emplace_back();
+    Buffer& matUBO = m_materialUBOs.back();
+    matUBO.init(allocator, sizeof(MaterialParams),
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU);
+    matUBO.uploadData(allocator, &params, sizeof(MaterialParams));
+
+    // Descriptor writes: binding 0 = texture, binding 1 = material UBO
     VkDescriptorImageInfo imageInfo{};
     imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     imageInfo.imageView   = texture.getImageView();
     imageInfo.sampler     = texture.getSampler();
 
-    VkWriteDescriptorSet descriptorWrite{};
-    descriptorWrite.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    descriptorWrite.dstSet           = set;
-    descriptorWrite.dstBinding       = 0;
-    descriptorWrite.dstArrayElement  = 0;
-    descriptorWrite.descriptorType   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    descriptorWrite.descriptorCount  = 1;
-    descriptorWrite.pImageInfo       = &imageInfo;
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = matUBO.getBuffer();
+    bufferInfo.offset = 0;
+    bufferInfo.range  = sizeof(MaterialParams);
 
-    vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+    std::array<VkWriteDescriptorSet, 2> writes{};
+
+    // Binding 0: texture sampler
+    writes[0].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet           = set;
+    writes[0].dstBinding       = 0;
+    writes[0].dstArrayElement  = 0;
+    writes[0].descriptorType   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[0].descriptorCount  = 1;
+    writes[0].pImageInfo       = &imageInfo;
+
+    // Binding 1: material UBO
+    writes[1].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet           = set;
+    writes[1].dstBinding       = 1;
+    writes[1].dstArrayElement  = 0;
+    writes[1].descriptorType   = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[1].descriptorCount  = 1;
+    writes[1].pBufferInfo      = &bufferInfo;
+
+    vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()),
+                           writes.data(), 0, nullptr);
 
     return set;
 }
