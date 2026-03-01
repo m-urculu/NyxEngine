@@ -2,6 +2,9 @@
 #include "renderer/VulkanContext.h"
 #include "renderer/Swapchain.h"
 #include "renderer/Pipeline.h"
+#include "renderer/Mesh.h"
+#include "renderer/Descriptors.h"
+#include "renderer/DepthBuffer.h"
 #include "Logger.h"
 
 #include <stdexcept>
@@ -22,23 +25,19 @@ void Renderer::init(VulkanContext& context, Swapchain& swapchain, Pipeline& pipe
 }
 
 void Renderer::cleanup(VkDevice device) {
-    // Destroy per-frame sync objects
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         vkDestroySemaphore(device, m_imageAvailableSemaphores[i], nullptr);
         vkDestroyFence(device, m_inFlightFences[i], nullptr);
     }
 
-    // Destroy per-image semaphores
     for (auto sem : m_renderFinishedSemaphores) {
         vkDestroySemaphore(device, sem, nullptr);
     }
 
-    // Destroy framebuffers
     for (auto framebuffer : m_framebuffers) {
         vkDestroyFramebuffer(device, framebuffer, nullptr);
     }
 
-    // Destroy command pool (this also frees all command buffers)
     vkDestroyCommandPool(device, m_commandPool, nullptr);
 }
 
@@ -48,15 +47,12 @@ void Renderer::recreateFramebuffers(VkDevice device, Swapchain& swapchain, Pipel
     }
     createFramebuffers(device, swapchain, pipeline);
 
-    // Recreate per-image sync objects for new swapchain image count
     uint32_t imageCount = static_cast<uint32_t>(swapchain.getImageViews().size());
 
-    // Destroy old per-image semaphores
     for (auto sem : m_renderFinishedSemaphores) {
         vkDestroySemaphore(device, sem, nullptr);
     }
 
-    // Create new ones
     m_renderFinishedSemaphores.resize(imageCount);
     VkSemaphoreCreateInfo semaphoreInfo{};
     semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -74,54 +70,41 @@ void Renderer::waitIdle(VkDevice device) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// FRAME RENDERING — The main render loop
+// FRAME RENDERING
 // ════════════════════════════════════════════════════════════════════════════
 
-bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain, Pipeline& pipeline) {
+bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain,
+                          Pipeline& pipeline, Mesh& mesh, Descriptors& descriptors) {
     VkDevice device = context.getDevice();
 
-    // ── Step 1: Wait for the previous frame using this slot to finish ──────
-    // Fences are CPU-GPU synchronization. We wait here until the GPU is done
-    // with the command buffer we're about to reuse.
     vkWaitForFences(device, 1, &m_inFlightFences[m_currentFrame],
                     VK_TRUE, UINT64_MAX);
 
-    // ── Step 2: Acquire the next image from the swapchain ──────────────────
-    // The semaphore will be signaled when the image is ready to be rendered to.
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
         device, swapchain.getSwapchain(), UINT64_MAX,
         m_imageAvailableSemaphores[m_currentFrame],
         VK_NULL_HANDLE, &imageIndex);
 
-    // If the swapchain is out of date (e.g., window resized), signal the caller
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-        return false;  // Caller should recreate swapchain
+        return false;
     } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
         throw std::runtime_error("Failed to acquire swapchain image");
     }
 
-    // Wait if a previous frame is still using this swapchain image.
-    // This handles the case where we have more swapchain images than
-    // frames-in-flight (e.g., 5 images but only 2 frames-in-flight).
     if (m_imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
         vkWaitForFences(device, 1, &m_imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
     }
-    // Mark this image as now being used by the current frame's fence
     m_imagesInFlight[imageIndex] = m_inFlightFences[m_currentFrame];
 
-    // Only reset the fence if we are actually going to submit work
     vkResetFences(device, 1, &m_inFlightFences[m_currentFrame]);
 
-    // ── Step 3: Record draw commands ───────────────────────────────────────
     vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
-    recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, swapchain, pipeline);
+    recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, swapchain, pipeline, mesh, descriptors);
 
-    // ── Step 4: Submit the command buffer to the GPU ───────────────────────
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-    // Wait for the image to be available before writing colors
     VkSemaphore waitSemaphores[]      = { m_imageAvailableSemaphores[m_currentFrame] };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
     submitInfo.waitSemaphoreCount = 1;
@@ -131,25 +114,19 @@ bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain, Pipeline&
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers    = &m_commandBuffers[m_currentFrame];
 
-    // Signal this semaphore when rendering is finished.
-    // Indexed by imageIndex (not m_currentFrame) because the present engine holds
-    // the semaphore until the image is re-acquired, and with mailbox mode there can
-    // be more images than frames-in-flight.
     VkSemaphore signalSemaphores[] = { m_renderFinishedSemaphores[imageIndex] };
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores    = signalSemaphores;
 
-    // The fence is signaled when the command buffer finishes executing
     if (vkQueueSubmit(context.getGraphicsQueue(), 1, &submitInfo,
                       m_inFlightFences[m_currentFrame]) != VK_SUCCESS) {
         throw std::runtime_error("Failed to submit draw command buffer");
     }
 
-    // ── Step 5: Present the rendered image to the screen ───────────────────
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores    = signalSemaphores;  // Wait for rendering to finish
+    presentInfo.pWaitSemaphores    = signalSemaphores;
 
     VkSwapchainKHR swapchains[] = { swapchain.getSwapchain() };
     presentInfo.swapchainCount = 1;
@@ -159,12 +136,11 @@ bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain, Pipeline&
     result = vkQueuePresentKHR(context.getPresentQueue(), &presentInfo);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-        return false;  // Caller should recreate swapchain
+        return false;
     } else if (result != VK_SUCCESS) {
         throw std::runtime_error("Failed to present swapchain image");
     }
 
-    // Advance to the next frame-in-flight slot
     m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     return true;
 }
@@ -205,13 +181,16 @@ void Renderer::createFramebuffers(VkDevice device, Swapchain& swapchain, Pipelin
     m_framebuffers.resize(imageViews.size());
 
     for (size_t i = 0; i < imageViews.size(); i++) {
-        VkImageView attachments[] = { imageViews[i] };
+        std::array<VkImageView, 2> attachments = {
+            imageViews[i],
+            swapchain.getDepthBuffer().getImageView()
+        };
 
         VkFramebufferCreateInfo framebufferInfo{};
         framebufferInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         framebufferInfo.renderPass      = pipeline.getRenderPass();
-        framebufferInfo.attachmentCount = 1;
-        framebufferInfo.pAttachments    = attachments;
+        framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+        framebufferInfo.pAttachments    = attachments.data();
         framebufferInfo.width           = swapchain.getExtent().width;
         framebufferInfo.height          = swapchain.getExtent().height;
         framebufferInfo.layers          = 1;
@@ -226,7 +205,6 @@ void Renderer::createSyncObjects(VkDevice device, uint32_t imageCount) {
     m_imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
     m_inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
 
-    // Per-image: one renderFinished semaphore and one fence tracker per swapchain image
     m_renderFinishedSemaphores.resize(imageCount);
     m_imagesInFlight.resize(imageCount, VK_NULL_HANDLE);
 
@@ -235,9 +213,8 @@ void Renderer::createSyncObjects(VkDevice device, uint32_t imageCount) {
 
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;  // Start signaled so first frame doesn't deadlock
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-    // Per-frame objects
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &m_imageAvailableSemaphores[i]) != VK_SUCCESS ||
             vkCreateFence(device, &fenceInfo, nullptr, &m_inFlightFences[i]) != VK_SUCCESS) {
@@ -245,7 +222,6 @@ void Renderer::createSyncObjects(VkDevice device, uint32_t imageCount) {
         }
     }
 
-    // Per-image semaphores
     for (uint32_t i = 0; i < imageCount; i++) {
         if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &m_renderFinishedSemaphores[i]) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create render-finished semaphore");
@@ -254,12 +230,12 @@ void Renderer::createSyncObjects(VkDevice device, uint32_t imageCount) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// COMMAND RECORDING — Tells the GPU what to draw
+// COMMAND RECORDING
 // ════════════════════════════════════════════════════════════════════════════
 
 void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex,
-                                    Swapchain& swapchain, Pipeline& pipeline) {
-    // Begin recording commands
+                                    Swapchain& swapchain, Pipeline& pipeline, Mesh& mesh,
+                                    Descriptors& descriptors) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
@@ -267,7 +243,6 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
         throw std::runtime_error("Failed to begin recording command buffer");
     }
 
-    // Begin the render pass — this transitions the image and clears it
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType       = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     renderPassInfo.renderPass  = pipeline.getRenderPass();
@@ -275,20 +250,22 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
     renderPassInfo.renderArea.offset = {0, 0};
     renderPassInfo.renderArea.extent = swapchain.getExtent();
 
-    // Clear color: dark blue-gray background
-    VkClearValue clearColor = {{{0.01f, 0.01f, 0.02f, 1.0f}}};
-    renderPassInfo.clearValueCount = 1;
-    renderPassInfo.pClearValues    = &clearColor;
+    std::array<VkClearValue, 2> clearValues{};
+    clearValues[0].color        = {{0.01f, 0.01f, 0.02f, 1.0f}};
+    clearValues[1].depthStencil = {1.0f, 0};
+    renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+    renderPassInfo.pClearValues    = clearValues.data();
 
     vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Bind the graphics pipeline
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.getPipeline());
 
-    // Draw 3 vertices (the triangle is hardcoded in the vertex shader)
-    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    VkDescriptorSet descSet = descriptors.getSet(m_currentFrame);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipeline.getPipelineLayout(), 0, 1, &descSet, 0, nullptr);
 
-    // End the render pass and finish recording
+    mesh.draw(commandBuffer);
+
     vkCmdEndRenderPass(commandBuffer);
 
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {

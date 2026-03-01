@@ -13,6 +13,7 @@
 // Think of this as the "foundation" — everything else in Vulkan builds on top of these.
 
 #include <vulkan/vulkan.h>
+#include <vk_mem_alloc.h>
 #include <vector>
 #include <optional>
 
@@ -52,9 +53,15 @@ public:
     VkSurfaceKHR     getSurface()        const { return m_surface; }
     VkQueue          getGraphicsQueue()  const { return m_graphicsQueue; }
     VkQueue          getPresentQueue()   const { return m_presentQueue; }
+    VmaAllocator     getAllocator()      const { return m_allocator; }
+    VkCommandPool    getCommandPool()    const { return m_commandPool; }
 
     QueueFamilyIndices    findQueueFamilies(VkPhysicalDevice device) const;
     SwapchainSupportDetails querySwapchainSupport(VkPhysicalDevice device) const;
+
+    // Single-time command buffer helpers (for staging uploads, layout transitions, etc.)
+    VkCommandBuffer beginSingleTimeCommands();
+    void endSingleTimeCommands(VkCommandBuffer commandBuffer);
 
 private:
     VkInstance               m_instance       = VK_NULL_HANDLE;
@@ -64,6 +71,8 @@ private:
     VkDevice                 m_device         = VK_NULL_HANDLE;
     VkQueue                  m_graphicsQueue  = VK_NULL_HANDLE;
     VkQueue                  m_presentQueue   = VK_NULL_HANDLE;
+    VmaAllocator             m_allocator      = VK_NULL_HANDLE;
+    VkCommandPool            m_commandPool    = VK_NULL_HANDLE;
 
     // ── Setup steps (called by init) ───────────────────────────────────────
     void createInstance();
@@ -71,6 +80,8 @@ private:
     void createSurface(GLFWwindow* window);
     void pickPhysicalDevice();
     void createLogicalDevice();
+    void createAllocator();
+    void createCommandPool();
 
     // ── Helpers ────────────────────────────────────────────────────────────
     bool checkValidationLayerSupport() const;

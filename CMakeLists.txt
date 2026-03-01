@@ -24,6 +24,14 @@ add_subdirectory(external/spdlog)
 add_library(glm INTERFACE)
 target_include_directories(glm INTERFACE external/glm)
 
+# ── VMA — Vulkan Memory Allocator (header-only, needs one implementation file)
+add_library(vma INTERFACE)
+target_include_directories(vma INTERFACE external/VulkanMemoryAllocator/include)
+
+# ── tinyobjloader — OBJ model loading (header-only) ─────────────────────
+add_library(tinyobjloader INTERFACE)
+target_include_directories(tinyobjloader INTERFACE external/tinyobjloader)
+
 # ── Collect all engine source files ─────────────────────────────────────────
 set(ENGINE_SOURCES
     src/main.cpp
@@ -34,6 +42,14 @@ set(ENGINE_SOURCES
     src/renderer/Swapchain.cpp
     src/renderer/Pipeline.cpp
     src/renderer/Renderer.cpp
+    src/renderer/VmaUsage.cpp
+    src/renderer/Buffer.cpp
+    src/renderer/Mesh.cpp
+    src/renderer/DepthBuffer.cpp
+    src/renderer/Descriptors.cpp
+    src/renderer/ObjLoader.cpp
+    src/Input.cpp
+    src/scene/Camera.cpp
 )
 
 # ── Create the executable ───────────────────────────────────────────────────
@@ -50,6 +66,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     glfw
     spdlog::spdlog
     glm
+    vma
+    tinyobjloader
 )
 
 # ── Enable validation layers in Debug builds ────────────────────────────────

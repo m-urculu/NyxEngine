@@ -1,17 +1,6 @@
 #pragma once
 
 // Pipeline.h — Graphics pipeline and render pass
-//
-// The graphics pipeline defines HOW things are rendered:
-// - Vertex shader → processes each vertex (position, color)
-// - Fragment shader → computes the color of each pixel
-// - Rasterization → converts triangles to pixels
-// - Color blending → combines new pixels with existing ones
-//
-// In Vulkan, the pipeline is almost entirely immutable once created.
-// Changing ANY setting requires creating a new pipeline.
-//
-// The render pass defines WHAT we're rendering to (which images/attachments).
 
 #include <vulkan/vulkan.h>
 #include <string>
@@ -19,13 +8,16 @@
 
 namespace VulkanEngine {
 
+class VulkanContext;
+
 class Pipeline {
 public:
-    void init(VkDevice device, VkExtent2D swapchainExtent, VkFormat swapchainFormat);
+    void init(VulkanContext& context, VkExtent2D swapchainExtent, VkFormat swapchainFormat,
+              VkFormat depthFormat, VkDescriptorSetLayout descriptorSetLayout);
     void cleanup(VkDevice device);
 
-    // Recreate after swapchain resize
-    void recreate(VkDevice device, VkExtent2D swapchainExtent, VkFormat swapchainFormat);
+    void recreate(VulkanContext& context, VkExtent2D swapchainExtent, VkFormat swapchainFormat,
+                  VkFormat depthFormat, VkDescriptorSetLayout descriptorSetLayout);
 
     VkRenderPass     getRenderPass()     const { return m_renderPass; }
     VkPipeline       getPipeline()       const { return m_pipeline; }
@@ -36,13 +28,11 @@ private:
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline       m_pipeline       = VK_NULL_HANDLE;
 
-    void createRenderPass(VkDevice device, VkFormat swapchainFormat);
-    void createGraphicsPipeline(VkDevice device, VkExtent2D swapchainExtent);
+    void createRenderPass(VkDevice device, VkFormat swapchainFormat, VkFormat depthFormat);
+    void createGraphicsPipeline(VkDevice device, VkExtent2D swapchainExtent,
+                                VkDescriptorSetLayout descriptorSetLayout);
 
-    // Read a compiled SPIR-V shader file into a byte buffer
     static std::vector<char> readShaderFile(const std::string& filepath);
-
-    // Create a Vulkan shader module from SPIR-V bytecode
     VkShaderModule createShaderModule(VkDevice device, const std::vector<char>& code);
 };
 
