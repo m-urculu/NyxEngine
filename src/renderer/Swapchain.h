@@ -34,7 +34,8 @@ private:
     std::vector<VkImageView> m_imageViews;
     DepthBuffer             m_depthBuffer;
 
-    void createSwapchain(VulkanContext& context, int windowWidth, int windowHeight);
+    void createSwapchain(VulkanContext& context, int windowWidth, int windowHeight,
+                         VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
     void createImageViews(VkDevice device);
 
     VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats);

@@ -13,6 +13,8 @@ class Pipeline;
 class Mesh;
 class Descriptors;
 class Registry;
+class UIPipeline;
+class TitleBar;
 
 class Renderer {
 public:
@@ -22,7 +24,8 @@ public:
     void cleanup(VkDevice device);
 
     bool drawFrame(VulkanContext& context, Swapchain& swapchain, Pipeline& pipeline,
-                    Registry& registry, Descriptors& descriptors);
+                    Registry& registry, Descriptors& descriptors,
+                    UIPipeline* uiPipeline = nullptr, TitleBar* titleBar = nullptr);
 
     void recreateFramebuffers(VkDevice device, Swapchain& swapchain, Pipeline& pipeline);
 
@@ -50,7 +53,8 @@ private:
 
     void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex,
                              Swapchain& swapchain, Pipeline& pipeline,
-                             Registry& registry, Descriptors& descriptors);
+                             Registry& registry, Descriptors& descriptors,
+                             UIPipeline* uiPipeline, TitleBar* titleBar);
 };
 
 } // namespace Talos

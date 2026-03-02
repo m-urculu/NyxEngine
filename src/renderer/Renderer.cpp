@@ -6,6 +6,8 @@
 #include "renderer/Descriptors.h"
 #include "renderer/DepthBuffer.h"
 #include "renderer/UniformTypes.h"
+#include "ui/UIPipeline.h"
+#include "ui/TitleBar.h"
 #include "ecs/Registry.h"
 #include "ecs/components/TransformComponent.h"
 #include "ecs/components/MeshComponent.h"
@@ -80,7 +82,8 @@ void Renderer::waitIdle(VkDevice device) {
 // ════════════════════════════════════════════════════════════════════════════
 
 bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain,
-                          Pipeline& pipeline, Registry& registry, Descriptors& descriptors) {
+                          Pipeline& pipeline, Registry& registry, Descriptors& descriptors,
+                          UIPipeline* uiPipeline, TitleBar* titleBar) {
     VkDevice device = context.getDevice();
 
     vkWaitForFences(device, 1, &m_inFlightFences[m_currentFrame],
@@ -106,7 +109,7 @@ bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain,
     vkResetFences(device, 1, &m_inFlightFences[m_currentFrame]);
 
     vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
-    recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, swapchain, pipeline, registry, descriptors);
+    recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, swapchain, pipeline, registry, descriptors, uiPipeline, titleBar);
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -241,7 +244,8 @@ void Renderer::createSyncObjects(VkDevice device, uint32_t imageCount) {
 
 void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex,
                                     Swapchain& swapchain, Pipeline& pipeline,
-                                    Registry& registry, Descriptors& descriptors) {
+                                    Registry& registry, Descriptors& descriptors,
+                                    UIPipeline* uiPipeline, TitleBar* titleBar) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
@@ -265,6 +269,21 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
     vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.getPipeline());
+
+    // Set dynamic viewport and scissor from current swapchain extent
+    VkViewport viewport{};
+    viewport.x        = 0.0f;
+    viewport.y        = 0.0f;
+    viewport.width    = static_cast<float>(swapchain.getExtent().width);
+    viewport.height   = static_cast<float>(swapchain.getExtent().height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+    scissor.extent = swapchain.getExtent();
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
     // Bind global descriptor set (set 0) once
     VkDescriptorSet globalSet = descriptors.getSet(m_currentFrame);
@@ -301,6 +320,18 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
         }
 
         mc.mesh->draw(commandBuffer);
+    }
+
+    // ── Draw UI overlay ────────────────────────────────────────────────────
+    if (uiPipeline && titleBar && titleBar->isVisible()) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline->getPipeline());
+
+        glm::vec2 screenSize(static_cast<float>(swapchain.getExtent().width),
+                             static_cast<float>(swapchain.getExtent().height));
+        vkCmdPushConstants(commandBuffer, uiPipeline->getPipelineLayout(),
+                           VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::vec2), &screenSize);
+
+        titleBar->draw(commandBuffer);
     }
 
     vkCmdEndRenderPass(commandBuffer);

@@ -26,6 +26,8 @@ Engine::Engine() = default;
 Engine::~Engine() {
     m_renderer.waitIdle(m_vulkanContext.getDevice());
 
+    m_titleBar.cleanup(m_vulkanContext.getAllocator());
+    m_uiPipeline.cleanup(m_vulkanContext.getDevice());
     m_resourceCache.cleanup(m_vulkanContext);
     m_renderer.cleanup(m_vulkanContext.getDevice());
     m_pipeline.cleanup(m_vulkanContext.getDevice());
@@ -56,7 +58,11 @@ void Engine::init() {
 
     m_resourceCache.init(m_vulkanContext);
 
-    Input::init(m_window->getHandle());
+    m_uiPipeline.init(m_vulkanContext, m_pipeline.getRenderPass());
+    m_titleBar.init(m_vulkanContext.getAllocator(), m_window->getHandle());
+
+    Input::init(m_window->getHandle(), m_window.get());
+    Input::setTitleBar(&m_titleBar);
 
     float aspect = static_cast<float>(m_window->getWidth()) / static_cast<float>(m_window->getHeight());
     m_camera.init({0.0f, 2.0f, 6.0f}, aspect);
@@ -84,18 +90,43 @@ void Engine::run() {
         }
 
         if (m_window->wasResized()) {
-            m_window->resetResizedFlag();
-            handleResize();
-            continue;
+            // Defer swapchain recreation while title bar resize is active
+            // (glfwSetWindowSize fires many resize events per drag)
+            if (!m_titleBar.isResizing()) {
+                m_window->resetResizedFlag();
+                handleResize();
+                continue;
+            }
+        }
+
+        // Title bar visibility and interaction
+        m_titleBar.setVisible(!m_window->isFullscreen());
+        bool cursorFree = !Input::isCursorCaptured();
+        m_titleBar.update(static_cast<float>(m_window->getWidth()),
+                          static_cast<float>(m_window->getHeight()), cursorFree);
+        if (cursorFree) {
+            m_titleBar.handleDragResize();
+            m_titleBar.updateCursorShape();
         }
 
         // Update UBO with current camera matrices
         updateUniformBuffer(m_renderer.getCurrentFrame());
 
         bool ok = m_renderer.drawFrame(m_vulkanContext, m_swapchain, m_pipeline,
-                                        m_registry, m_descriptors);
+                                        m_registry, m_descriptors,
+                                        &m_uiPipeline, &m_titleBar);
         if (!ok) {
             handleResize();
+        }
+
+        // FPS counter
+        m_fpsCount++;
+        m_fpsTimer += m_time.getDeltaTime();
+        if (m_fpsTimer >= 2.0f) {
+            float fps = static_cast<float>(m_fpsCount) / m_fpsTimer;
+            LOG_INFO("FPS: {:.1f}", fps);
+            m_fpsCount = 0;
+            m_fpsTimer = 0.0f;
         }
     }
 
@@ -129,6 +160,7 @@ void Engine::handleResize() {
     m_pipeline.recreate(m_vulkanContext, m_swapchain.getExtent(), m_swapchain.getImageFormat(),
                          m_swapchain.getDepthBuffer().getFormat(),
                          m_descriptors.getGlobalLayout(), m_descriptors.getMaterialLayout());
+    m_uiPipeline.recreate(m_vulkanContext, m_pipeline.getRenderPass());
     m_renderer.recreateFramebuffers(m_vulkanContext.getDevice(), m_swapchain, m_pipeline);
 
     m_camera.setAspectRatio(static_cast<float>(width) / static_cast<float>(height));

@@ -66,6 +66,8 @@ set(ENGINE_SOURCES
     src/renderer/GltfLoader.cpp
     src/renderer/ResourceCache.cpp
     src/scene/Camera.cpp
+    src/ui/UIPipeline.cpp
+    src/ui/TitleBar.cpp
 )
 
 # ── Create the executable ───────────────────────────────────────────────────

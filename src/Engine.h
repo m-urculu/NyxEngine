@@ -9,6 +9,8 @@
 #include "renderer/Renderer.h"
 #include "renderer/Descriptors.h"
 #include "renderer/ResourceCache.h"
+#include "ui/UIPipeline.h"
+#include "ui/TitleBar.h"
 #include "scene/Camera.h"
 #include "core/Time.h"
 #include "ecs/Registry.h"
@@ -36,6 +38,8 @@ private:
     Pipeline                 m_pipeline;
     Renderer                 m_renderer;
     ResourceCache            m_resourceCache;
+    UIPipeline               m_uiPipeline;
+    TitleBar                 m_titleBar;
     Camera                   m_camera;
     Time                     m_time;
     Registry                 m_registry;
@@ -43,6 +47,10 @@ private:
     // Orbiting child entity for demo
     Entity m_orbitEntity = NULL_ENTITY;
     float  m_orbitAngle  = 0.0f;
+
+    // FPS tracking
+    float m_fpsTimer  = 0.0f;
+    int   m_fpsCount  = 0;
 
     // Light entities
     Entity m_sunEntity        = NULL_ENTITY;

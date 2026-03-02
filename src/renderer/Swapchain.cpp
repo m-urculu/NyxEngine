@@ -37,8 +37,25 @@ void Swapchain::cleanup(VkDevice device, VmaAllocator allocator) {
 void Swapchain::recreate(VulkanContext& context, int windowWidth, int windowHeight) {
     vkDeviceWaitIdle(context.getDevice());
 
-    cleanup(context.getDevice(), context.getAllocator());
-    createSwapchain(context, windowWidth, windowHeight);
+    // Keep old swapchain handle for smooth transition
+    VkSwapchainKHR oldSwapchain = m_swapchain;
+    m_swapchain = VK_NULL_HANDLE;
+
+    // Clean up image views and depth buffer (but not the old swapchain yet)
+    m_depthBuffer.cleanup(context.getDevice(), context.getAllocator());
+    for (auto imageView : m_imageViews) {
+        vkDestroyImageView(context.getDevice(), imageView, nullptr);
+    }
+    m_imageViews.clear();
+
+    // Create new swapchain, passing old handle for seamless transition
+    createSwapchain(context, windowWidth, windowHeight, oldSwapchain);
+
+    // Now destroy the old swapchain
+    if (oldSwapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(context.getDevice(), oldSwapchain, nullptr);
+    }
+
     createImageViews(context.getDevice());
     m_depthBuffer.init(context, m_extent);
 
@@ -49,7 +66,8 @@ void Swapchain::recreate(VulkanContext& context, int windowWidth, int windowHeig
 // PRIVATE
 // ════════════════════════════════════════════════════════════════════════════
 
-void Swapchain::createSwapchain(VulkanContext& context, int windowWidth, int windowHeight) {
+void Swapchain::createSwapchain(VulkanContext& context, int windowWidth, int windowHeight,
+                                 VkSwapchainKHR oldSwapchain) {
     SwapchainSupportDetails support = context.querySwapchainSupport(context.getPhysicalDevice());
 
     VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(support.formats);
@@ -86,7 +104,7 @@ void Swapchain::createSwapchain(VulkanContext& context, int windowWidth, int win
     createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     createInfo.presentMode    = presentMode;
     createInfo.clipped        = VK_TRUE;
-    createInfo.oldSwapchain   = VK_NULL_HANDLE;
+    createInfo.oldSwapchain   = oldSwapchain;
 
     if (vkCreateSwapchainKHR(context.getDevice(), &createInfo, nullptr, &m_swapchain) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create swapchain");
@@ -142,12 +160,9 @@ VkSurfaceFormatKHR Swapchain::chooseSwapSurfaceFormat(const std::vector<VkSurfac
 }
 
 VkPresentModeKHR Swapchain::chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& modes) {
-    for (const auto& mode : modes) {
-        if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
-            LOG_INFO("Present mode: Mailbox (triple buffering)");
-            return mode;
-        }
-    }
+    // FIFO (V-Sync) is guaranteed by spec and avoids tearing on software renderers.
+    // Mailbox can be re-enabled when targeting discrete GPUs.
+    (void)modes;
     LOG_INFO("Present mode: FIFO (V-Sync)");
     return VK_PRESENT_MODE_FIFO_KHR;
 }
