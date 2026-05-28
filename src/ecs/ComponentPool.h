@@ -13,7 +13,7 @@
 #include <cstddef>
 #include <cassert>
 
-namespace Talos {
+namespace Nyx {
 
 template <typename T>
 class ComponentPool : public IComponentPoolBase {
@@ -92,4 +92,4 @@ private:
     std::unordered_map<Entity, size_t>      m_sparse;    // Entity → dense index
 };
 
-} // namespace Talos
+} // namespace Nyx

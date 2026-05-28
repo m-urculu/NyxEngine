@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <limits>
 
-namespace Talos {
+namespace Nyx {
 
 // ════════════════════════════════════════════════════════════════════════════
 // PUBLIC
@@ -160,10 +160,25 @@ VkSurfaceFormatKHR Swapchain::chooseSwapSurfaceFormat(const std::vector<VkSurfac
 }
 
 VkPresentModeKHR Swapchain::chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& modes) {
-    // FIFO (V-Sync) is guaranteed by spec and avoids tearing on software renderers.
-    // Mailbox can be re-enabled when targeting discrete GPUs.
-    (void)modes;
-    LOG_INFO("Present mode: FIFO (V-Sync)");
+    // Uncapped: present without waiting for vblank so the engine runs at its
+    // natural rate. Prefer IMMEDIATE (no sync at all — may tear), then MAILBOX
+    // (uncapped render, latest frame shown, no tearing). FIFO (V-Sync) is the
+    // spec-guaranteed fallback.
+    bool hasImmediate = false, hasMailbox = false;
+    for (VkPresentModeKHR m : modes) {
+        if (m == VK_PRESENT_MODE_IMMEDIATE_KHR) hasImmediate = true;
+        if (m == VK_PRESENT_MODE_MAILBOX_KHR)   hasMailbox   = true;
+    }
+
+    if (hasImmediate) {
+        LOG_INFO("Present mode: IMMEDIATE (uncapped, V-Sync off)");
+        return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+    if (hasMailbox) {
+        LOG_INFO("Present mode: MAILBOX (uncapped, no tearing)");
+        return VK_PRESENT_MODE_MAILBOX_KHR;
+    }
+    LOG_INFO("Present mode: FIFO (V-Sync) — uncapped modes unavailable");
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
@@ -187,4 +202,4 @@ VkExtent2D Swapchain::chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilit
     return actualExtent;
 }
 
-} // namespace Talos
+} // namespace Nyx

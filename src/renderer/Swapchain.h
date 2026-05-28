@@ -7,7 +7,7 @@
 #include <vector>
 #include "renderer/DepthBuffer.h"
 
-namespace Talos {
+namespace Nyx {
 
 class VulkanContext;
 
@@ -44,4 +44,4 @@ private:
                                         int windowWidth, int windowHeight);
 };
 
-} // namespace Talos
+} // namespace Nyx

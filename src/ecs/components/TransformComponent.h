@@ -8,7 +8,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-namespace Talos {
+namespace Nyx {
 
 struct TransformComponent {
     glm::vec3 position = {0.0f, 0.0f, 0.0f};
@@ -21,4 +21,4 @@ struct TransformComponent {
     glm::mat4 worldMatrix = glm::mat4(1.0f);
 };
 
-} // namespace Talos
+} // namespace Nyx

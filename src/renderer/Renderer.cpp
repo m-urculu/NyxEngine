@@ -2,23 +2,34 @@
 #include "renderer/VulkanContext.h"
 #include "renderer/Swapchain.h"
 #include "renderer/Pipeline.h"
+#include "renderer/ShadowMap.h"
+#include "renderer/HdrTarget.h"
 #include "renderer/Mesh.h"
 #include "renderer/Descriptors.h"
 #include "renderer/DepthBuffer.h"
 #include "renderer/UniformTypes.h"
 #include "ui/UIPipeline.h"
 #include "ui/TitleBar.h"
+#include "ui/ContentBrowser.h"
+#include "ui/Console.h"
+#include "ui/CodeEditor.h"
+#include "ui/SceneHierarchy.h"
+#include "ui/Inspector.h"
+#include "ui/Gizmo.h"
+#include "renderer/ImagePipeline.h"
+#include "renderer/MaterialPreviewPipeline.h"
 #include "ecs/Registry.h"
 #include "ecs/components/TransformComponent.h"
 #include "ecs/components/MeshComponent.h"
 #include "ecs/components/MaterialComponent.h"
+#include "ecs/components/SkinComponent.h"
 #include "Logger.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
 #include <stdexcept>
 #include <array>
 
-namespace Talos {
+namespace Nyx {
 
 // ════════════════════════════════════════════════════════════════════════════
 // PUBLIC
@@ -27,12 +38,13 @@ namespace Talos {
 void Renderer::init(VulkanContext& context, Swapchain& swapchain, Pipeline& pipeline) {
     createCommandPool(context);
     createCommandBuffers(context.getDevice());
-    createFramebuffers(context.getDevice(), swapchain, pipeline);
+    createFramebuffers(context, swapchain, pipeline);
+    createCompositeDescriptor(context.getDevice(), pipeline);
     createSyncObjects(context.getDevice(), static_cast<uint32_t>(swapchain.getImageViews().size()));
     LOG_INFO("Renderer initialized ({} frames in flight)", MAX_FRAMES_IN_FLIGHT);
 }
 
-void Renderer::cleanup(VkDevice device) {
+void Renderer::cleanup(VkDevice device, VmaAllocator allocator) {
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         vkDestroySemaphore(device, m_imageAvailableSemaphores[i], nullptr);
         vkDestroyFence(device, m_inFlightFences[i], nullptr);
@@ -42,18 +54,41 @@ void Renderer::cleanup(VkDevice device) {
         vkDestroySemaphore(device, sem, nullptr);
     }
 
-    for (auto framebuffer : m_framebuffers) {
-        vkDestroyFramebuffer(device, framebuffer, nullptr);
+    if (m_compositePool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device, m_compositePool, nullptr);
+        m_compositePool = VK_NULL_HANDLE;
+        m_compositeSet  = VK_NULL_HANDLE;
     }
+
+    for (auto fb : m_compositeFramebuffers) vkDestroyFramebuffer(device, fb, nullptr);
+    m_compositeFramebuffers.clear();
+    if (m_sceneFramebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, m_sceneFramebuffer, nullptr);
+        m_sceneFramebuffer = VK_NULL_HANDLE;
+    }
+    // HdrTarget + BloomPass own VMA-allocated images plus framebuffers / render
+    // passes / pipelines — these MUST be destroyed before vkDestroyDevice. Their
+    // unique_ptr destructors alone won't release the GPU handles; call their
+    // explicit cleanup() first, then drop the wrappers.
+    if (m_bloomPass) { m_bloomPass->cleanup(device, allocator); m_bloomPass.reset(); }
+    if (m_hdrTarget) { m_hdrTarget->cleanup(device, allocator); m_hdrTarget.reset(); }
 
     vkDestroyCommandPool(device, m_commandPool, nullptr);
 }
 
-void Renderer::recreateFramebuffers(VkDevice device, Swapchain& swapchain, Pipeline& pipeline) {
-    for (auto fb : m_framebuffers) {
-        vkDestroyFramebuffer(device, fb, nullptr);
+void Renderer::recreateFramebuffers(VulkanContext& context, Swapchain& swapchain, Pipeline& pipeline) {
+    // Tear down all swapchain-extent resources, recreate at new size, rewrite the
+    // composite descriptor to point at the new HDR view.
+    VkDevice device = context.getDevice();
+    for (auto fb : m_compositeFramebuffers) vkDestroyFramebuffer(device, fb, nullptr);
+    m_compositeFramebuffers.clear();
+    if (m_sceneFramebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, m_sceneFramebuffer, nullptr);
+        m_sceneFramebuffer = VK_NULL_HANDLE;
     }
-    createFramebuffers(device, swapchain, pipeline);
+
+    createFramebuffers(context, swapchain, pipeline);
+    writeCompositeDescriptor(device);
 
     uint32_t imageCount = static_cast<uint32_t>(swapchain.getImageViews().size());
 
@@ -73,6 +108,10 @@ void Renderer::recreateFramebuffers(VkDevice device, Swapchain& swapchain, Pipel
     m_imagesInFlight.assign(imageCount, VK_NULL_HANDLE);
 }
 
+VkImageView Renderer::getHdrView() const {
+    return m_hdrTarget ? m_hdrTarget->getView() : VK_NULL_HANDLE;
+}
+
 void Renderer::waitIdle(VkDevice device) {
     vkDeviceWaitIdle(device);
 }
@@ -83,7 +122,11 @@ void Renderer::waitIdle(VkDevice device) {
 
 bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain,
                           Pipeline& pipeline, Registry& registry, Descriptors& descriptors,
-                          UIPipeline* uiPipeline, TitleBar* titleBar) {
+                          ShadowMap* shadowMap,
+                          UIPipeline* uiPipeline, TitleBar* titleBar,
+                          ContentBrowser* contentBrowser, Console* console, CodeEditor* editor,
+                          ImagePipeline* imagePipeline, MaterialPreviewPipeline* matPipeline,
+                          SceneHierarchy* hierarchy, Inspector* inspector, Gizmo* gizmo) {
     VkDevice device = context.getDevice();
 
     vkWaitForFences(device, 1, &m_inFlightFences[m_currentFrame],
@@ -109,7 +152,7 @@ bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain,
     vkResetFences(device, 1, &m_inFlightFences[m_currentFrame]);
 
     vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
-    recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, swapchain, pipeline, registry, descriptors, uiPipeline, titleBar);
+    recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, swapchain, pipeline, registry, descriptors, shadowMap, uiPipeline, titleBar, contentBrowser, console, editor, imagePipeline, matPipeline, hierarchy, inspector, gizmo);
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -185,29 +228,106 @@ void Renderer::createCommandBuffers(VkDevice device) {
     }
 }
 
-void Renderer::createFramebuffers(VkDevice device, Swapchain& swapchain, Pipeline& pipeline) {
-    const auto& imageViews = swapchain.getImageViews();
-    m_framebuffers.resize(imageViews.size());
+void Renderer::createFramebuffers(VulkanContext& context, Swapchain& swapchain, Pipeline& pipeline) {
+    VkDevice device   = context.getDevice();
+    VkExtent2D extent = swapchain.getExtent();
 
-    for (size_t i = 0; i < imageViews.size(); i++) {
-        std::array<VkImageView, 2> attachments = {
-            imageViews[i],
-            swapchain.getDepthBuffer().getImageView()
-        };
-
-        VkFramebufferCreateInfo framebufferInfo{};
-        framebufferInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebufferInfo.renderPass      = pipeline.getRenderPass();
-        framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-        framebufferInfo.pAttachments    = attachments.data();
-        framebufferInfo.width           = swapchain.getExtent().width;
-        framebufferInfo.height          = swapchain.getExtent().height;
-        framebufferInfo.layers          = 1;
-
-        if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &m_framebuffers[i]) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create framebuffer");
-        }
+    // (Re)create the HDR target at the current swapchain extent.
+    if (!m_hdrTarget) m_hdrTarget = std::make_unique<HdrTarget>();
+    if (m_hdrTarget->getExtent().width != extent.width || m_hdrTarget->getExtent().height != extent.height) {
+        if (m_hdrTarget->getImage() == VK_NULL_HANDLE) m_hdrTarget->init(context, extent);
+        else                                           m_hdrTarget->resize(context, extent);
     }
+
+    // Bloom mip chain — sized to half the scene extent at mip 0.
+    if (!m_bloomPass) {
+        m_bloomPass = std::make_unique<BloomPass>();
+        m_bloomPass->init(context, m_hdrTarget->getView(), m_hdrTarget->getSampler(), extent);
+    } else {
+        m_bloomPass->resize(context, m_hdrTarget->getView(), extent);
+    }
+
+    // Scene framebuffer — HDR colour + shared depth. One framebuffer (both attachments
+    // are shared; the per-frame fence chain serializes work).
+    {
+        std::array<VkImageView, 2> atts = {
+            m_hdrTarget->getView(),
+            swapchain.getDepthBuffer().getImageView(),
+        };
+        VkFramebufferCreateInfo fbi{};
+        fbi.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fbi.renderPass      = pipeline.getRenderPass();
+        fbi.attachmentCount = static_cast<uint32_t>(atts.size());
+        fbi.pAttachments    = atts.data();
+        fbi.width           = extent.width;
+        fbi.height          = extent.height;
+        fbi.layers          = 1;
+        if (vkCreateFramebuffer(device, &fbi, nullptr, &m_sceneFramebuffer) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create scene framebuffer");
+    }
+
+    // Composite framebuffers — one per swapchain image (each holds its own image view).
+    const auto& imageViews = swapchain.getImageViews();
+    m_compositeFramebuffers.resize(imageViews.size());
+    for (size_t i = 0; i < imageViews.size(); i++) {
+        VkFramebufferCreateInfo fbi{};
+        fbi.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fbi.renderPass      = pipeline.getCompositeRenderPass();
+        fbi.attachmentCount = 1;
+        fbi.pAttachments    = &imageViews[i];
+        fbi.width           = extent.width;
+        fbi.height          = extent.height;
+        fbi.layers          = 1;
+        if (vkCreateFramebuffer(device, &fbi, nullptr, &m_compositeFramebuffers[i]) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create composite framebuffer");
+    }
+}
+
+void Renderer::createCompositeDescriptor(VkDevice device, Pipeline& pipeline) {
+    VkDescriptorPoolSize size{};
+    size.type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    size.descriptorCount = 2;   // binding 0 = HDR, binding 1 = bloom
+
+    VkDescriptorPoolCreateInfo pool{};
+    pool.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool.poolSizeCount = 1;
+    pool.pPoolSizes    = &size;
+    pool.maxSets       = 1;
+    if (vkCreateDescriptorPool(device, &pool, nullptr, &m_compositePool) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create composite descriptor pool");
+
+    VkDescriptorSetLayout layout = pipeline.getCompositeSetLayout();
+    VkDescriptorSetAllocateInfo alloc{};
+    alloc.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc.descriptorPool     = m_compositePool;
+    alloc.descriptorSetCount = 1;
+    alloc.pSetLayouts        = &layout;
+    if (vkAllocateDescriptorSets(device, &alloc, &m_compositeSet) != VK_SUCCESS)
+        throw std::runtime_error("Failed to allocate composite descriptor set");
+
+    writeCompositeDescriptor(device);
+}
+
+void Renderer::writeCompositeDescriptor(VkDevice device) {
+    if (m_compositeSet == VK_NULL_HANDLE || !m_hdrTarget || !m_bloomPass) return;
+    std::array<VkDescriptorImageInfo, 2> infos{};
+    infos[0].imageView   = m_hdrTarget->getView();
+    infos[0].sampler     = m_hdrTarget->getSampler();
+    infos[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    infos[1].imageView   = m_bloomPass->getResultView();
+    infos[1].sampler     = m_bloomPass->getSampler();
+    infos[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    std::array<VkWriteDescriptorSet, 2> writes{};
+    for (uint32_t i = 0; i < 2; i++) {
+        writes[i].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet          = m_compositeSet;
+        writes[i].dstBinding      = i;
+        writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].descriptorCount = 1;
+        writes[i].pImageInfo      = &infos[i];
+    }
+    vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void Renderer::createSyncObjects(VkDevice device, uint32_t imageCount) {
@@ -245,7 +365,11 @@ void Renderer::createSyncObjects(VkDevice device, uint32_t imageCount) {
 void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex,
                                     Swapchain& swapchain, Pipeline& pipeline,
                                     Registry& registry, Descriptors& descriptors,
-                                    UIPipeline* uiPipeline, TitleBar* titleBar) {
+                                    ShadowMap* shadowMap,
+                                    UIPipeline* uiPipeline, TitleBar* titleBar,
+                                    ContentBrowser* contentBrowser, Console* console, CodeEditor* editor,
+                                    ImagePipeline* imagePipeline, MaterialPreviewPipeline* matPipeline,
+                                    SceneHierarchy* hierarchy, Inspector* inspector, Gizmo* gizmo) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
@@ -253,15 +377,54 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
         throw std::runtime_error("Failed to begin recording command buffer");
     }
 
+    // ── Shadow pass (sun shadow map) ────────────────────────────────────────────
+    // Runs BEFORE the main render pass: depth-only render of every opaque mesh from
+    // the sun's POV. The framebuffer's render-pass dependency transitions the depth
+    // image to DEPTH_READ_ONLY at the end, so mesh.frag can sample it directly via
+    // set 0 binding 1 in the main pass. Skinned/cutout meshes don't cast shadows yet.
+    if (shadowMap) {
+        VkDescriptorSet globalSet = descriptors.getSet(m_currentFrame);
+        shadowMap->beginRenderPass(commandBuffer);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowMap->getPipeline());
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                shadowMap->getPipelineLayout(), 0, 1, &globalSet, 0, nullptr);
+        vkCmdSetDepthBias(commandBuffer, 1.5f, 0.0f, 1.75f);   // constant, clamp, slope (pipeline dyn state)
+
+        auto& meshPool = registry.pool<MeshComponent>();
+        for (size_t i = 0; i < meshPool.size(); i++) {
+            Entity entity = meshPool.getEntity(i);
+            const MeshComponent& mc = meshPool[i];
+            if (!mc.mesh) continue;
+            if (!registry.has<TransformComponent>(entity)) continue;
+
+            const bool isCutout  = registry.has<MaterialComponent>(entity)
+                                && registry.get<MaterialComponent>(entity).alphaCutoff > 0.0f;
+            const bool isSkinned = registry.has<SkinComponent>(entity)
+                                && registry.get<SkinComponent>(entity).jointSet != VK_NULL_HANDLE;
+            if (isCutout || isSkinned) continue;    // not handled by this pre-pass yet
+
+            PushConstants pc{};
+            pc.model        = registry.get<TransformComponent>(entity).worldMatrix;
+            pc.normalMatrix = glm::mat4(1.0f);
+            vkCmdPushConstants(commandBuffer, shadowMap->getPipelineLayout(),
+                               VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
+            mc.mesh->draw(commandBuffer);
+        }
+        shadowMap->endRenderPass(commandBuffer);
+    }
+
+    // ── Scene render pass (HDR linear target) ───────────────────────────────────
+    // Writes the HDR scene into m_hdrTarget; the composite pass below tonemaps it
+    // into the swapchain. The (imageIndex) slot is only used by the composite FB.
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType       = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     renderPassInfo.renderPass  = pipeline.getRenderPass();
-    renderPassInfo.framebuffer = m_framebuffers[imageIndex];
+    renderPassInfo.framebuffer = m_sceneFramebuffer;
     renderPassInfo.renderArea.offset = {0, 0};
     renderPassInfo.renderArea.extent = swapchain.getExtent();
 
     std::array<VkClearValue, 2> clearValues{};
-    clearValues[0].color        = {{0.01f, 0.01f, 0.02f, 1.0f}};
+    clearValues[0].color        = {{0.01f, 0.01f, 0.02f, 1.0f}};  // matches dark sky behind composite
     clearValues[1].depthStencil = {1.0f, 0};
     renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
     renderPassInfo.pClearValues    = clearValues.data();
@@ -285,13 +448,61 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
     scissor.extent = swapchain.getExtent();
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    // Bind global descriptor set (set 0) once
+    // ── Procedural skybox ───────────────────────────────────────────────────────
+    // Drawn first: fullscreen tri at depth=1 with depth-write OFF, so opaque meshes
+    // will overdraw it where present. The same analytic sky function drives this
+    // and the IBL terms in mesh.frag, so reflections match the visible background.
     VkDescriptorSet globalSet = descriptors.getSet(m_currentFrame);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.getSkyPipeline());
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipeline.getSkyPipelineLayout(), 0, 1, &globalSet, 0, nullptr);
+    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+    // ── Depth pre-pass (opaque only) ────────────────────────────────────────────
+    // Lays down depth for every opaque mesh first so the main pass's heavy PBR
+    // shader runs at most once per pixel (depth EQUAL + no write). Major win on the
+    // head/helmet region where multiple primitives stack up. Skinned and cutout are
+    // skipped here — they write their own depth in the main pass.
+    auto& meshPool = registry.pool<MeshComponent>();
+    {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          pipeline.getDepthPrePassPipeline());
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipeline.getDepthPrePassPipelineLayout(), 0, 1, &globalSet, 0, nullptr);
+        for (size_t i = 0; i < meshPool.size(); i++) {
+            Entity entity = meshPool.getEntity(i);
+            const MeshComponent& mc = meshPool[i];
+            if (!mc.mesh) continue;
+            if (!registry.has<TransformComponent>(entity)) continue;
+
+            const bool isCutout  = registry.has<MaterialComponent>(entity)
+                                && registry.get<MaterialComponent>(entity).alphaCutoff > 0.0f;
+            const bool isSkinned = registry.has<SkinComponent>(entity)
+                                && registry.get<SkinComponent>(entity).jointSet != VK_NULL_HANDLE;
+            if (isCutout || isSkinned) continue;     // not part of the opaque pre-pass
+
+            PushConstants pc{};
+            pc.model        = registry.get<TransformComponent>(entity).worldMatrix;
+            pc.normalMatrix = glm::mat4(1.0f);       // unused by depth_only.vert
+            vkCmdPushConstants(commandBuffer, pipeline.getDepthPrePassPipelineLayout(),
+                               VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
+            mc.mesh->draw(commandBuffer);
+        }
+    }
+
+    // Bind the global set again under the mesh pipeline layout (Vulkan re-binds are
+    // cheap; mesh layouts are set-compatible at set 0 so the binding stays valid).
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipeline.getPipelineLayout(), 0, 1, &globalSet, 0, nullptr);
 
-    // Iterate all entities with Transform + Mesh, push constants per draw
-    auto& meshPool = registry.pool<MeshComponent>();
+    // Iterate all entities with Transform + Mesh, push constants per draw. Three
+    // pipeline kinds: opaque (cull back, depth EQUAL + no write thanks to the pre-pass
+    // above), skinned (joints, set 2, depth LESS + write), and cutout (alpha-masked,
+    // two-sided/no-cull, depth LESS + write). All share sets 0/1, so the global set
+    // bound above stays valid across pipeline switches. Cutout takes precedence (hair
+    // cards are static), so a cutout+skinned mesh renders unskinned for now.
+    enum Kind { K_NONE = -1, K_OPAQUE, K_SKINNED, K_CUTOUT };
+    int boundKind = K_NONE;
     for (size_t i = 0; i < meshPool.size(); i++) {
         Entity entity = meshPool.getEntity(i);
         const MeshComponent& mc = meshPool[i];
@@ -301,12 +512,30 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
 
         const TransformComponent& tc = registry.get<TransformComponent>(entity);
 
-        // Push per-object model + normalMatrix
+        const bool isCutout  = registry.has<MaterialComponent>(entity)
+                            && registry.get<MaterialComponent>(entity).alphaCutoff > 0.0f;
+        const bool isSkinned = !isCutout && registry.has<SkinComponent>(entity)
+                            && registry.get<SkinComponent>(entity).jointSet != VK_NULL_HANDLE;
+
+        int kind = isCutout ? K_CUTOUT : (isSkinned ? K_SKINNED : K_OPAQUE);
+        VkPipelineLayout layout = (kind == K_SKINNED) ? pipeline.getSkinnedPipelineLayout()
+                                                      : pipeline.getPipelineLayout();
+
+        if (kind != boundKind) {
+            VkPipeline pipe = (kind == K_SKINNED) ? pipeline.getSkinnedPipeline()
+                            : (kind == K_CUTOUT)  ? pipeline.getCutoutPipeline()
+                                                  : pipeline.getPipeline();
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            boundKind = kind;
+        }
+
+        // Push per-object model + normalMatrix (ignored by the skinned shader, but
+        // kept for layout compatibility).
         PushConstants pc{};
         pc.model        = tc.worldMatrix;
         pc.normalMatrix = glm::transpose(glm::inverse(tc.worldMatrix));
 
-        vkCmdPushConstants(commandBuffer, pipeline.getPipelineLayout(),
+        vkCmdPushConstants(commandBuffer, layout,
                            VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
 
         // Bind per-material descriptor set (set 1) if entity has MaterialComponent
@@ -314,16 +543,61 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
             const MaterialComponent& mat = registry.get<MaterialComponent>(entity);
             if (mat.descriptorSet != VK_NULL_HANDLE) {
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        pipeline.getPipelineLayout(), 1, 1,
-                                        &mat.descriptorSet, 0, nullptr);
+                                        layout, 1, 1, &mat.descriptorSet, 0, nullptr);
             }
+        }
+
+        // Bind joint matrices (set 2) for skinned meshes
+        if (isSkinned) {
+            VkDescriptorSet jointSet = registry.get<SkinComponent>(entity).jointSet;
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    layout, 2, 1, &jointSet, 0, nullptr);
         }
 
         mc.mesh->draw(commandBuffer);
     }
 
-    // ── Draw UI overlay ────────────────────────────────────────────────────
-    if (uiPipeline && titleBar && titleBar->isVisible()) {
+    // End of scene RP — m_hdrTarget transitions to SHADER_READ_ONLY via subpass dep.
+    vkCmdEndRenderPass(commandBuffer);
+
+    // ── Bloom: downsample brightpass from HDR → mip chain → upsample tent → mip 0
+    if (m_bloomPass) m_bloomPass->render(commandBuffer);
+
+    // ── Composite render pass: tonemap HDR + bloom → swapchain, then UI overlay ─
+    {
+        VkClearValue clear{};
+        clear.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+        VkRenderPassBeginInfo cri{};
+        cri.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        cri.renderPass        = pipeline.getCompositeRenderPass();
+        cri.framebuffer       = m_compositeFramebuffers[imageIndex];
+        cri.renderArea.offset = {0, 0};
+        cri.renderArea.extent = swapchain.getExtent();
+        cri.clearValueCount   = 1;
+        cri.pClearValues      = &clear;
+        vkCmdBeginRenderPass(commandBuffer, &cri, VK_SUBPASS_CONTENTS_INLINE);
+
+        // Composite tri samples HDR + tonemaps. Needs viewport/scissor set again
+        // (dynamic state isn't preserved across render passes in Vulkan).
+        VkViewport vp{};
+        vp.x = 0.0f; vp.y = 0.0f;
+        vp.width  = static_cast<float>(swapchain.getExtent().width);
+        vp.height = static_cast<float>(swapchain.getExtent().height);
+        vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &vp);
+        VkRect2D sc{};
+        sc.offset = {0, 0};
+        sc.extent = swapchain.getExtent();
+        vkCmdSetScissor(commandBuffer, 0, 1, &sc);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.getCompositePipeline());
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipeline.getCompositePipelineLayout(), 0, 1, &m_compositeSet, 0, nullptr);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    }
+
+    // ── Draw UI overlay (title bar + content browser, same pipeline) ────────
+    if (uiPipeline) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline->getPipeline());
 
         glm::vec2 screenSize(static_cast<float>(swapchain.getExtent().width),
@@ -331,7 +605,30 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
         vkCmdPushConstants(commandBuffer, uiPipeline->getPipelineLayout(),
                            VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::vec2), &screenSize);
 
-        titleBar->draw(commandBuffer);
+        // FPS graph sits just above the 3D view and BELOW the editor/panels.
+        if (titleBar && titleBar->isVisible())             titleBar->drawFps(commandBuffer);
+        // Gizmo overlays the 3D view, below the editor/panels (so they occlude it).
+        if (gizmo)                                         gizmo->draw(commandBuffer);
+        if (editor && editor->isVisible())                 editor->draw(commandBuffer);
+        if (hierarchy && hierarchy->isVisible())           hierarchy->draw(commandBuffer);
+        if (inspector && inspector->isVisible())           inspector->draw(commandBuffer);
+        if (console && console->isVisible())               console->draw(commandBuffer);
+        // Content browser drawn after the right dock so its drag-ghost shows on top.
+        if (contentBrowser && contentBrowser->isVisible()) contentBrowser->draw(commandBuffer);
+        if (titleBar && titleBar->isVisible())             titleBar->draw(commandBuffer);     // caption on top
+    }
+
+    // ── Active asset tab preview (separate pipelines) — flat image or sphere ──
+    if (editor) {
+        if (imagePipeline && editor->activeIsImage()) {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, imagePipeline->getPipeline());
+            glm::vec2 screenSize(static_cast<float>(swapchain.getExtent().width),
+                                 static_cast<float>(swapchain.getExtent().height));
+            editor->drawImage(commandBuffer, screenSize);
+        } else if (matPipeline && editor->activeIsMaterial()) {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, matPipeline->getPipeline());
+            editor->drawSphere(commandBuffer);
+        }
     }
 
     vkCmdEndRenderPass(commandBuffer);
@@ -341,4 +638,4 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
     }
 }
 
-} // namespace Talos
+} // namespace Nyx

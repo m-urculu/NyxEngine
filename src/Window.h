@@ -12,7 +12,7 @@
 #include <string>
 #include <functional>
 
-namespace Talos {
+namespace Nyx {
 
 class Window {
 public:
@@ -45,6 +45,15 @@ public:
     void toggleFullscreen();
     bool isFullscreen() const { return m_fullscreen; }
 
+    // Reveal the window. The window is created hidden so the splash screen can
+    // own the screen until the engine finishes initialising; call show() once
+    // the first frame is ready to render.
+    void show();
+
+    // Native "pick a folder" dialog (Windows). Returns the selected path (forward
+    // slashes) or "" if cancelled / unsupported.
+    std::string openFolderDialog(const std::string& title = "Open Folder");
+
 private:
     GLFWwindow* m_window = nullptr;
     int m_width = 0;
@@ -60,4 +69,4 @@ private:
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
 };
 
-} // namespace Talos
+} // namespace Nyx

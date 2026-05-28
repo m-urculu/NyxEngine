@@ -7,9 +7,10 @@
 
 #include "renderer/Buffer.h"
 #include "renderer/Vertex.h"
+#include <glm/glm.hpp>
 #include <vector>
 
-namespace Talos {
+namespace Nyx {
 
 class VulkanContext;
 
@@ -23,10 +24,17 @@ public:
 
     uint32_t getIndexCount() const { return m_indexCount; }
 
+    // Local-space axis-aligned bounds (computed from the vertices) — used for
+    // viewport ray-picking.
+    const glm::vec3& boundsMin() const { return m_min; }
+    const glm::vec3& boundsMax() const { return m_max; }
+
 private:
     Buffer   m_vertexBuffer;
     Buffer   m_indexBuffer;
     uint32_t m_indexCount = 0;
+    glm::vec3 m_min{0.0f};
+    glm::vec3 m_max{0.0f};
 };
 
-} // namespace Talos
+} // namespace Nyx

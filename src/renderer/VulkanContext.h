@@ -20,7 +20,7 @@
 // Forward declaration — we don't need to include the full GLFW header here
 struct GLFWwindow;
 
-namespace Talos {
+namespace Nyx {
 
 // Stores the queue family indices we need.
 // A "queue family" is a group of GPU queues that support certain operations.
@@ -98,4 +98,4 @@ private:
     );
 };
 
-} // namespace Talos
+} // namespace Nyx

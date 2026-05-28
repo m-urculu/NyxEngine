@@ -6,7 +6,7 @@
 
 #include "ecs/Entity.h"
 
-namespace Talos {
+namespace Nyx {
 
 class IComponentPoolBase {
 public:
@@ -14,4 +14,4 @@ public:
     virtual void removeIfExists(Entity entity) = 0;
 };
 
-} // namespace Talos
+} // namespace Nyx

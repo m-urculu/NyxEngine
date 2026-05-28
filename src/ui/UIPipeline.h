@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace Talos {
+namespace Nyx {
 
 class VulkanContext;
 
@@ -33,4 +33,4 @@ private:
     VkShaderModule createShaderModule(VkDevice device, const std::vector<char>& code);
 };
 
-} // namespace Talos
+} // namespace Nyx

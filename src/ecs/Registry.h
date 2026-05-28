@@ -12,12 +12,17 @@
 #include <typeindex>
 #include <unordered_map>
 
-namespace Talos {
+namespace Nyx {
 
 class Registry {
 public:
     Entity createEntity();
     void destroyEntity(Entity entity);
+
+    // Reset the entity-id counter so the next createEntity() returns 0 again. Only
+    // call when no entities remain (e.g. right after a scene clear) — keeps ids low
+    // and stable across reloads instead of climbing every time.
+    void resetEntityIds() { m_nextEntity = 0; }
 
     template <typename T>
     T& assign(Entity entity, const T& component) {
@@ -72,4 +77,4 @@ private:
     std::unordered_map<std::type_index, std::unique_ptr<IComponentPoolBase>> m_pools;
 };
 
-} // namespace Talos
+} // namespace Nyx

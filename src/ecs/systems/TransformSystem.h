@@ -2,7 +2,7 @@
 
 // TransformSystem.h — Computes world matrices, resolves parent chains
 
-namespace Talos {
+namespace Nyx {
 
 class Registry;
 
@@ -11,4 +11,4 @@ public:
     static void update(Registry& registry);
 };
 
-} // namespace Talos
+} // namespace Nyx

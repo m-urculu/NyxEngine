@@ -5,7 +5,7 @@
 #include <glm/glm.hpp>
 #include <cstdint>
 
-namespace Talos {
+namespace Nyx {
 
 struct LightComponent {
     enum class Type : uint32_t { Directional = 0, Point = 1 };
@@ -16,4 +16,4 @@ struct LightComponent {
     float radius = 10.0f; // attenuation range for point lights
 };
 
-} // namespace Talos
+} // namespace Nyx

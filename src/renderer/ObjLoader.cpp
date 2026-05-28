@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <stdexcept>
 
-namespace Talos {
+namespace Nyx {
 
 bool ObjLoader::load(const std::string& filepath,
                      std::vector<Vertex>& outVertices,
@@ -89,4 +89,4 @@ bool ObjLoader::load(const std::string& filepath,
     return true;
 }
 
-} // namespace Talos
+} // namespace Nyx

@@ -2,10 +2,12 @@
 #include "Input.h"
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <cmath>
 
-namespace Talos {
+namespace Nyx {
 
 void Camera::init(glm::vec3 position, float aspectRatio) {
     m_position = position;
@@ -14,18 +16,17 @@ void Camera::init(glm::vec3 position, float aspectRatio) {
 }
 
 void Camera::update(float deltaTime) {
-    // Mouse look
-    float dx = Input::getMouseDeltaX() * m_sensitivity;
-    float dy = Input::getMouseDeltaY() * m_sensitivity;
+    // Rotation is handled by orbit() (middle-mouse drag); update() only flies the
+    // camera with WASD. Suppressed while a sub-window (editor/hierarchy/content
+    // browser/console) holds focus, so panel shortcuts don't also fly the camera.
+    if (Input::cameraMovementSuppressed()) return;
 
-    m_yaw   += dx;
-    m_pitch -= dy;  // Inverted: mouse up = look up
+    // Ctrl+<key> is always a shortcut (Ctrl+S save, Ctrl+Z undo, Ctrl+Shift+Z redo,
+    // Ctrl+C/V/X clipboard). If Ctrl is held, the user is composing a shortcut and
+    // doesn't want Shift→down or W/A/S/D firing at the same time.
+    if (Input::isKeyDown(GLFW_KEY_LEFT_CONTROL) || Input::isKeyDown(GLFW_KEY_RIGHT_CONTROL))
+        return;
 
-    m_pitch = std::clamp(m_pitch, -89.0f, 89.0f);
-
-    updateVectors();
-
-    // WASD movement
     float velocity = m_speed * deltaTime;
 
     if (Input::isKeyDown(GLFW_KEY_W)) m_position += m_front * velocity;
@@ -34,6 +35,52 @@ void Camera::update(float deltaTime) {
     if (Input::isKeyDown(GLFW_KEY_D)) m_position += m_right * velocity;
     if (Input::isKeyDown(GLFW_KEY_SPACE))       m_position += m_up * velocity;
     if (Input::isKeyDown(GLFW_KEY_LEFT_SHIFT))  m_position -= m_up * velocity;
+}
+
+void Camera::orbit(const glm::vec3& pivot, float dx, float dy) {
+    // Rotation angles. Signs chosen to match the old drag feel: drag right turns
+    // the view right; drag down looks down. The position revolves the same way so
+    // the pivot stays fixed on screen.
+    float yawAxis   = -dx * m_sensitivity;   // about world-up
+    float pitchAxis = -dy * m_sensitivity;   // about the camera's right axis
+
+    // Limit pitch so the view can't roll over the poles (matches free-look clamp).
+    float newPitch = std::clamp(m_pitch + pitchAxis, -89.0f, 89.0f);
+    pitchAxis = newPitch - m_pitch;
+
+    glm::quat R = glm::angleAxis(glm::radians(yawAxis),   glm::vec3(0.0f, 1.0f, 0.0f))
+                * glm::angleAxis(glm::radians(pitchAxis), m_right);
+
+    // Revolve the camera position rigidly around the pivot.
+    m_position = pivot + R * (m_position - pivot);
+
+    // Rotate the look direction by the same amount, then re-derive yaw/pitch so
+    // subsequent WASD / orbiting stays consistent.
+    glm::vec3 f = glm::normalize(R * m_front);
+    m_yaw   = glm::degrees(std::atan2(f.z, f.x));
+    m_pitch = glm::degrees(std::asin(std::clamp(f.y, -1.0f, 1.0f)));
+    updateVectors();
+}
+
+void Camera::dolly(float steps, const glm::vec3& pivot) {
+    glm::vec3 toPivot = pivot - m_position;
+    float dist = glm::length(toPivot);
+    if (dist < 1e-4f) return;
+    glm::vec3 dir = toPivot / dist;
+
+    // Exponential zoom: each scroll step scales the distance by a constant factor,
+    // so the absolute move shrinks naturally as you approach. At dist=10 one step
+    // closes ~1.5 units; at dist=2 it closes ~0.3; at dist=0.5 it closes ~0.07.
+    // This is the standard DCC-tool feel (Blender/Maya/Unity).
+    constexpr float ZOOM_PER_STEP = 0.85f;       // <1 → step toward pivot; ~15% per notch
+    float factor = std::pow(ZOOM_PER_STEP, steps);
+    float newDist = dist * factor;
+
+    // Don't cross past (or land on) the pivot when zooming in.
+    constexpr float MIN_PIVOT_DIST = 0.05f;
+    if (newDist < MIN_PIVOT_DIST) newDist = MIN_PIVOT_DIST;
+
+    m_position = pivot - dir * newDist;
 }
 
 glm::mat4 Camera::getViewMatrix() const {
@@ -63,4 +110,4 @@ void Camera::updateVectors() {
     m_up    = glm::normalize(glm::cross(m_right, m_front));
 }
 
-} // namespace Talos
+} // namespace Nyx

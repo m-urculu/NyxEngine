@@ -5,7 +5,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/quaternion.hpp>
 
-namespace Talos {
+namespace Nyx {
 
 static glm::mat4 computeLocalMatrix(const TransformComponent& t) {
     glm::mat4 T = glm::translate(glm::mat4(1.0f), t.position);
@@ -43,4 +43,4 @@ void TransformSystem::update(Registry& registry) {
     }
 }
 
-} // namespace Talos
+} // namespace Nyx

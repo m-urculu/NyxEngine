@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <cstring>
 
-namespace Talos {
+namespace Nyx {
 
 void Buffer::init(VmaAllocator allocator, VkDeviceSize size,
                   VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage) {
@@ -35,9 +35,16 @@ void Buffer::cleanup(VmaAllocator allocator) {
 }
 
 void Buffer::uploadData(VmaAllocator allocator, const void* data, VkDeviceSize size) {
+    // Never memcpy past the allocation. A caller uploading over-capacity data (e.g.
+    // a UI panel whose 1px-quad text overflows its buffer) would otherwise corrupt
+    // memory and crash in memcpy. Clamp to the buffer size instead.
+    if (size > m_size) size = m_size;
     void* mapped = nullptr;
-    vmaMapMemory(allocator, m_allocation, &mapped);
+    if (vmaMapMemory(allocator, m_allocation, &mapped) != VK_SUCCESS || !mapped) return;
     std::memcpy(mapped, data, static_cast<size_t>(size));
+    // Flush so the write is visible to the GPU on NON-coherent host memory (no-op
+    // when already HOST_COHERENT).
+    vmaFlushAllocation(allocator, m_allocation, 0, VK_WHOLE_SIZE);
     vmaUnmapMemory(allocator, m_allocation);
 }
 
@@ -52,4 +59,4 @@ void Buffer::copyBuffer(VulkanContext& context, VkBuffer srcBuffer,
     context.endSingleTimeCommands(commandBuffer);
 }
 
-} // namespace Talos
+} // namespace Nyx

@@ -8,7 +8,7 @@
 
 #include <stdexcept>
 
-namespace Talos {
+namespace Nyx {
 
 void ResourceCache::init(VulkanContext& context) {
     m_defaultTexture = std::make_unique<Texture>();
@@ -66,17 +66,19 @@ Mesh* ResourceCache::getOrCreateMesh(VulkanContext& context, const std::string& 
     return ptr;
 }
 
-Texture* ResourceCache::getOrCreateTexture(VulkanContext& context, const std::string& filepath) {
-    auto it = m_textures.find(filepath);
+Texture* ResourceCache::getOrCreateTexture(VulkanContext& context, const std::string& filepath, bool srgb) {
+    // sRGB and linear views of the same file are distinct GPU textures → distinct keys.
+    std::string key = (srgb ? "srgb:" : "lin:") + filepath;
+    auto it = m_textures.find(key);
     if (it != m_textures.end()) {
         return it->second.get();
     }
 
     auto tex = std::make_unique<Texture>();
-    tex->loadFromFile(context, filepath);
+    tex->loadFromFile(context, filepath, srgb);
     Texture* ptr = tex.get();
-    m_textures[filepath] = std::move(tex);
+    m_textures[key] = std::move(tex);
     return ptr;
 }
 
-} // namespace Talos
+} // namespace Nyx

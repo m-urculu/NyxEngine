@@ -1,6 +1,6 @@
 #include "ecs/Registry.h"
 
-namespace Talos {
+namespace Nyx {
 
 Entity Registry::createEntity() {
     return m_nextEntity++;
@@ -12,4 +12,4 @@ void Registry::destroyEntity(Entity entity) {
     }
 }
 
-} // namespace Talos
+} // namespace Nyx

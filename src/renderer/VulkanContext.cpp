@@ -6,7 +6,7 @@
 #include <set>
 #include <string>
 
-namespace Talos {
+namespace Nyx {
 
 // ── Validation layers ──────────────────────────────────────────────────────
 // Validation layers are Vulkan's debugging tools. They check every Vulkan
@@ -100,9 +100,9 @@ void VulkanContext::createInstance() {
     // Tell Vulkan about our application (optional but good practice)
     VkApplicationInfo appInfo{};
     appInfo.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pApplicationName   = "Talos";
+    appInfo.pApplicationName   = "Nyx Engine";
     appInfo.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
-    appInfo.pEngineName        = "Talos";
+    appInfo.pEngineName        = "Nyx Engine";
     appInfo.engineVersion      = VK_MAKE_VERSION(0, 1, 0);
     appInfo.apiVersion         = VK_API_VERSION_1_2;
 
@@ -478,4 +478,4 @@ VKAPI_ATTR VkBool32 VKAPI_CALL VulkanContext::debugCallback(
     return VK_FALSE;
 }
 
-} // namespace Talos
+} // namespace Nyx

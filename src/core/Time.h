@@ -7,7 +7,7 @@
 
 #include <GLFW/glfw3.h>
 
-namespace Talos {
+namespace Nyx {
 
 class Time {
 public:
@@ -28,4 +28,4 @@ private:
     float m_accumulator = 0.0f;
 };
 
-} // namespace Talos
+} // namespace Nyx

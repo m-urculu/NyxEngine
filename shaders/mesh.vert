@@ -21,6 +21,10 @@ layout(set = 0, binding = 0) uniform UniformBufferObject {
     vec4 cameraPosition;
     GpuLightData lights[8];
     ivec4 lightCountAndPad;
+    vec4 skyTop;
+    vec4 skyHorizon;
+    vec4 skyGround;
+    mat4 lightSpace;
 } ubo;
 
 // Per-object push constants
@@ -34,13 +38,27 @@ layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec3 fragNormal;
 layout(location = 2) out vec3 fragWorldPos;
 layout(location = 3) out vec2 fragTexCoord;
+layout(location = 4) out vec3 fragDiffIBL;     // per-vertex sky irradiance, interpolated
+
+// Cheap 3-color weighted blend — diffuse IBL is low-frequency so vertex interpolation
+// is plenty. Sampling once per vertex (not per pixel) is one of the biggest wins.
+vec3 sampleSky(vec3 dir) {
+    float u = max( dir.y, 0.0);
+    float d = max(-dir.y, 0.0);
+    vec3 col = ubo.skyHorizon.rgb * (1.0 - u - d)
+             + ubo.skyTop.rgb     * u
+             + ubo.skyGround.rgb  * d;
+    return col * ubo.skyHorizon.w;
+}
 
 void main() {
     vec4 worldPos = pc.model * vec4(inPosition, 1.0);
     gl_Position   = ubo.projection * ubo.view * worldPos;
 
     fragColor    = inColor;
-    fragNormal   = mat3(pc.normalMatrix) * inNormal;
+    vec3 worldN  = mat3(pc.normalMatrix) * inNormal;
+    fragNormal   = worldN;
     fragWorldPos = worldPos.xyz;
     fragTexCoord = inTexCoord;
+    fragDiffIBL  = sampleSky(normalize(worldN));
 }

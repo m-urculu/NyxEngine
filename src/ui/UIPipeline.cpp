@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <array>
 
-namespace Talos {
+namespace Nyx {
 
 // ════════════════════════════════════════════════════════════════════════════
 // PUBLIC
@@ -218,4 +218,4 @@ VkShaderModule UIPipeline::createShaderModule(VkDevice device, const std::vector
     return shaderModule;
 }
 
-} // namespace Talos
+} // namespace Nyx

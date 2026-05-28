@@ -7,9 +7,9 @@
 #include <cstdint>
 #include <limits>
 
-namespace Talos {
+namespace Nyx {
 
 using Entity = uint32_t;
 constexpr Entity NULL_ENTITY = std::numeric_limits<uint32_t>::max();
 
-} // namespace Talos
+} // namespace Nyx

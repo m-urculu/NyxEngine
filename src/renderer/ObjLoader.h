@@ -6,7 +6,7 @@
 #include <vector>
 #include <string>
 
-namespace Talos {
+namespace Nyx {
 
 class ObjLoader {
 public:
@@ -18,4 +18,4 @@ public:
                      glm::vec3 defaultColor = {0.7f, 0.7f, 0.7f});
 };
 
-} // namespace Talos
+} // namespace Nyx

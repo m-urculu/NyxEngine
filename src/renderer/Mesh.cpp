@@ -4,12 +4,21 @@
 
 #include <stdexcept>
 
-namespace Talos {
+namespace Nyx {
 
 void Mesh::init(VulkanContext& context, const std::vector<Vertex>& vertices,
                 const std::vector<uint32_t>& indices) {
     m_indexCount = static_cast<uint32_t>(indices.size());
     VmaAllocator allocator = context.getAllocator();
+
+    // Local-space AABB for ray-picking.
+    if (!vertices.empty()) {
+        m_min = m_max = vertices[0].position;
+        for (const Vertex& v : vertices) {
+            m_min = glm::min(m_min, v.position);
+            m_max = glm::max(m_max, v.position);
+        }
+    }
 
     // ── Vertex buffer (staging → GPU) ─────────────────────────────────────
     VkDeviceSize vertexSize = sizeof(Vertex) * vertices.size();
@@ -59,4 +68,4 @@ void Mesh::draw(VkCommandBuffer commandBuffer) const {
     vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
 }
 
-} // namespace Talos
+} // namespace Nyx

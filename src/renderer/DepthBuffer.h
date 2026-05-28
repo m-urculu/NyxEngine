@@ -6,7 +6,7 @@
 #include <vk_mem_alloc.h>
 #include <vector>
 
-namespace Talos {
+namespace Nyx {
 
 class VulkanContext;
 
@@ -32,4 +32,4 @@ private:
                                          VkFormatFeatureFlags features);
 };
 
-} // namespace Talos
+} // namespace Nyx

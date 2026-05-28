@@ -6,7 +6,7 @@
 
 #include <glm/glm.hpp>
 
-namespace Talos {
+namespace Nyx {
 
 class Camera {
 public:
@@ -17,8 +17,19 @@ public:
     glm::mat4 getViewMatrix() const;
     glm::mat4 getProjectionMatrix() const;
     glm::vec3 getPosition() const { return m_position; }
+    glm::vec3 getFront()    const { return m_front; }
+
+    // Turntable orbit around a pivot (middle-mouse drag). Rotates the camera
+    // rigidly about the pivot so the pivot stays put on screen — no view snap.
+    void orbit(const glm::vec3& pivot, float dx, float dy);
+
+    // Dolly toward / away from a pivot (scroll wheel). steps>0 zooms in; the
+    // step size scales with distance so it's smooth near and far.
+    void dolly(float steps, const glm::vec3& pivot);
 
     void setAspectRatio(float aspectRatio);
+    void  setFov(float fovDegrees) { m_fov = fovDegrees; }   // proj rebuilt from m_fov each frame
+    float getFov() const { return m_fov; }
 
 private:
     glm::vec3 m_position = {0.0f, 0.0f, 3.0f};
@@ -39,4 +50,4 @@ private:
     void updateVectors();
 };
 
-} // namespace Talos
+} // namespace Nyx

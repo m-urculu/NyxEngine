@@ -11,7 +11,7 @@
 #include <spdlog/spdlog.h>
 #include <memory>
 
-namespace Talos {
+namespace Nyx {
 
 class Logger {
 public:
@@ -25,12 +25,12 @@ private:
     static std::shared_ptr<spdlog::logger> s_logger;
 };
 
-} // namespace Talos
+} // namespace Nyx
 
 // ── Convenience macros ─────────────────────────────────────────────────────
 // These let you write LOG_INFO("hello") instead of Logger::getLogger()->info("hello")
-#define LOG_TRACE(...)  ::Talos::Logger::getLogger()->trace(__VA_ARGS__)
-#define LOG_INFO(...)   ::Talos::Logger::getLogger()->info(__VA_ARGS__)
-#define LOG_WARN(...)   ::Talos::Logger::getLogger()->warn(__VA_ARGS__)
-#define LOG_ERROR(...)  ::Talos::Logger::getLogger()->error(__VA_ARGS__)
-#define LOG_FATAL(...)  ::Talos::Logger::getLogger()->critical(__VA_ARGS__)
+#define LOG_TRACE(...)  ::Nyx::Logger::getLogger()->trace(__VA_ARGS__)
+#define LOG_INFO(...)   ::Nyx::Logger::getLogger()->info(__VA_ARGS__)
+#define LOG_WARN(...)   ::Nyx::Logger::getLogger()->warn(__VA_ARGS__)
+#define LOG_ERROR(...)  ::Nyx::Logger::getLogger()->error(__VA_ARGS__)
+#define LOG_FATAL(...)  ::Nyx::Logger::getLogger()->critical(__VA_ARGS__)

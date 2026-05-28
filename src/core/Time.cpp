@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace Talos {
+namespace Nyx {
 
 void Time::init() {
     m_lastTime    = static_cast<float>(glfwGetTime());
@@ -21,4 +21,4 @@ void Time::update() {
     m_accumulator += m_deltaTime;
 }
 
-} // namespace Talos
+} // namespace Nyx
