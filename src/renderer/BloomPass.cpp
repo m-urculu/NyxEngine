@@ -16,7 +16,9 @@ namespace Nyx {
 struct BloomPC {
     float invTexelX;
     float invTexelY;
-    float strength;
+    float threshold;   // brightpass cutoff (only used when mode == 0)
+    float knee;        // soft-knee half-width
+    float strength;    // carried for parity with composite
     float mode;
 };
 
@@ -348,7 +350,7 @@ void BloomPass::writeSourceSets(VkDevice device, VkImageView hdrView) {
     vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
-void BloomPass::render(VkCommandBuffer cmd) {
+void BloomPass::render(VkCommandBuffer cmd, float threshold, float knee) {
     if (m_mipCount == 0) return;
 
     auto beginPass = [&](VkRenderPass rp, uint32_t mip) {
@@ -381,6 +383,8 @@ void BloomPass::render(VkCommandBuffer cmd) {
         BloomPC pc{};
         pc.invTexelX = 1.0f / static_cast<float>(srcExtent.width);
         pc.invTexelY = 1.0f / static_cast<float>(srcExtent.height);
+        pc.threshold = threshold;
+        pc.knee      = knee;
         pc.strength  = 0.0f;
         pc.mode      = (mip == 0) ? 0.0f : 1.0f;   // 0 = brightpass extract, 1 = plain downsample
         vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
@@ -400,6 +404,8 @@ void BloomPass::render(VkCommandBuffer cmd) {
         BloomPC pc{};
         pc.invTexelX = 1.0f / static_cast<float>(srcExtent.width);
         pc.invTexelY = 1.0f / static_cast<float>(srcExtent.height);
+        pc.threshold = threshold;
+        pc.knee      = knee;
         pc.strength  = 1.0f;
         pc.mode      = 2.0f;
         vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);

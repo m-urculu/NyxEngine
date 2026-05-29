@@ -202,6 +202,10 @@ void Console::update(float windowWidth, float windowHeight, float leftOffset) {
         }
         if (!m_overButton && cmx >= m_winW - TOGGLE_W && cmx < m_winW) m_overButton = true;
     }
+    // Collapsed: the whole strip clicks to expand, so the pointer cursor
+    // should kick in anywhere over it.
+    if (!m_expanded && cmx >= m_left && cmx < m_winW && cmy >= py && cmy < py + HEADER_H)
+        m_overButton = true;
 
     // Visible line slots + scroll clamp (needs the current line count).
     const float contentTop = py + HEADER_H + 2.0f;

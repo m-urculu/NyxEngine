@@ -3,6 +3,7 @@
 #include "ecs/Registry.h"
 #include "ecs/components/MeshComponent.h"
 #include "ecs/components/LightComponent.h"
+#include "ecs/components/EnvironmentComponent.h"
 #include "ecs/components/TransformComponent.h"
 
 #include <algorithm>
@@ -39,7 +40,10 @@ void SceneHierarchy::buildRows(Registry& reg) {
         seen.insert(e);
         Row row{};
         row.entity = e;
-        if (reg.has<LightComponent>(e)) {
+        if (reg.has<EnvironmentComponent>(e)) {
+            row.kind  = Kind::Environment;
+            row.label = "Environment";
+        } else if (reg.has<LightComponent>(e)) {
             row.kind = Kind::Light;
             const auto& lc = reg.get<LightComponent>(e);
             row.label = (lc.type == LightComponent::Type::Directional) ? "Directional Light" : "Point Light";
@@ -52,6 +56,9 @@ void SceneHierarchy::buildRows(Registry& reg) {
         }
         m_rows.push_back(std::move(row));
     };
+    // Environment first so it pins to the top of the list regardless of ID order.
+    auto& envPool = reg.pool<EnvironmentComponent>();
+    for (size_t i = 0; i < envPool.size(); ++i) consider(envPool.getEntity(i));
     auto& meshPool = reg.pool<MeshComponent>();
     for (size_t i = 0; i < meshPool.size(); ++i) consider(meshPool.getEntity(i));
     auto& lightPool = reg.pool<LightComponent>();
@@ -59,8 +66,29 @@ void SceneHierarchy::buildRows(Registry& reg) {
     auto& tfPool = reg.pool<TransformComponent>();
     for (size_t i = 0; i < tfPool.size(); ++i) consider(tfPool.getEntity(i));
 
-    std::sort(m_rows.begin(), m_rows.end(),
-              [](const Row& a, const Row& b) { return a.entity < b.entity; });
+    // Sync the manual order vector with the current entity set: drop missing,
+    // append new ones (in id order) so newly-spawned rows land at the bottom.
+    m_order.erase(std::remove_if(m_order.begin(), m_order.end(),
+                  [&](Entity e) { return !seen.count(e); }), m_order.end());
+    {
+        std::unordered_set<Entity> inOrder(m_order.begin(), m_order.end());
+        std::vector<Entity> fresh;
+        for (const Row& r : m_rows)
+            if (r.kind != Kind::Environment && !inOrder.count(r.entity))
+                fresh.push_back(r.entity);
+        std::sort(fresh.begin(), fresh.end());
+        for (Entity e : fresh) m_order.push_back(e);
+    }
+
+    // Sort rows by manual-order index, with Environment pinned to the top.
+    std::unordered_map<Entity, int> idx;
+    idx.reserve(m_order.size());
+    for (size_t i = 0; i < m_order.size(); ++i) idx[m_order[i]] = static_cast<int>(i);
+    std::sort(m_rows.begin(), m_rows.end(), [&](const Row& a, const Row& b) {
+        if (a.kind == Kind::Environment && b.kind != Kind::Environment) return true;
+        if (b.kind == Kind::Environment && a.kind != Kind::Environment) return false;
+        return idx[a.entity] < idx[b.entity];
+    });
 
     // Prune the selection to entities that still exist.
     m_selected.erase(std::remove_if(m_selected.begin(), m_selected.end(),
@@ -121,13 +149,23 @@ void SceneHierarchy::update(Registry& registry, float x0, float width, float top
     if (cursorActive || m_leftDown) glfwGetCursorPos(m_window, &mx, &my);
     m_curX = mx; m_curY = my;
 
-    // Drag past a threshold from the press point becomes a rubber-band marquee.
+    // Drag past a threshold from the press point starts a marquee (if pressed
+    // on empty area) or a reorder drag (if pressed on a row that isn't the
+    // pinned Environment).
     if (m_leftDown) {
         bool down = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
         if (!down) { m_leftDown = false; }   // safety; handleRelease normally clears it
         else {
-            if (!m_marquee && (std::fabs(mx - m_pressX) > 4.0 || std::fabs(my - m_pressY) > 4.0))
-                m_marquee = true;
+            const bool moved = std::fabs(mx - m_pressX) > 4.0 || std::fabs(my - m_pressY) > 4.0;
+            if (!m_marquee && !m_reorderDrag && moved) {
+                if (m_pressRow >= 0
+                    && m_pressRow < static_cast<int>(m_rows.size())
+                    && m_rows[m_pressRow].kind != Kind::Environment) {
+                    m_reorderDrag = true;
+                } else {
+                    m_marquee = true;
+                }
+            }
             if (m_marquee) {
                 double y0 = std::min(m_pressY, my), y1 = std::max(m_pressY, my);
                 std::vector<Entity> hit;
@@ -143,11 +181,29 @@ void SceneHierarchy::update(Registry& registry, float x0, float width, float top
                     m_selected = hit;
                 }
             }
+            if (m_reorderDrag) {
+                const float listTop = top + HEADER_H;
+                int insert;
+                int row = rowAtY(my);
+                if (row < 0) {
+                    insert = static_cast<int>(m_rows.size());
+                } else {
+                    float ry      = listTop + row * ROW_H - m_scroll;
+                    float center  = ry + ROW_H * 0.5f;
+                    insert = (my < center) ? row : row + 1;
+                }
+                // Environment is always pinned at index 0; clamp so the drop
+                // can never land above it.
+                if (!m_rows.empty() && m_rows[0].kind == Kind::Environment && insert < 1)
+                    insert = 1;
+                m_reorderInsertIdx = insert;
+            }
         }
     }
 
     m_vertices.clear();
     m_indices.clear();
+    m_overButton = false;   // re-tested below for hover over the collapse toggle / rail
 
     const glm::vec4 panelBg  = {0.065f, 0.070f, 0.085f, 0.97f};
     const glm::vec4 headerBg = {0.10f,  0.105f, 0.130f, 1.0f};
@@ -167,21 +223,74 @@ void SceneHierarchy::update(Registry& registry, float x0, float width, float top
 
     addQuad(x0, top, width, height, panelBg);
 
+    // Collapsed rail mode — same shape the content browser uses when collapsed.
+    // Whole panel becomes a thin clickable strip with a ◀ chevron at the top.
+    if (m_collapsedRail) {
+        bool railHover = cursorActive && mx >= x0 && mx < x0 + width
+                      && my >= top    && my < top   + height;
+        if (railHover) m_overButton = true;
+        addQuad(x0, top, width, HEADER_H, railHover ? hoverBg : headerBg);
+        const glm::vec4 toggleCol{0.78f, 0.80f, 0.86f, 1.0f};
+        addArrow(x0 + width * 0.5f, top + HEADER_H * 0.5f, false, toggleCol);  // ◀ expand
+        // Left divider + resize-edge highlight — drawn LAST so the mint strip
+        // isn't covered by the rail hoverBg in the top HEADER_H rows.
+        if (m_leftEdgeHighlight) {
+            const glm::vec4 mint = {0.42f, 1.00f, 0.66f, 1.0f};
+            addQuad(x0, top, 2.0f, height, mint);
+        } else {
+            addQuad(x0, top, 1.0f, height, border);
+        }
+        // Cache the whole panel rect as the toggle hit area.
+        m_collapseBtnX = x0;
+        m_collapseBtnY = top;
+        m_collapseBtnW = width;
+        m_collapseBtnH = height;
+        if (m_vertices.size() <= VERT_CAP && m_indices.size() <= IDX_CAP) {
+            if (!m_vertices.empty()) {
+                m_vertexBuffer.uploadData(m_allocator, m_vertices.data(), m_vertices.size() * sizeof(UIVertex));
+                m_indexBuffer .uploadData(m_allocator, m_indices .data(), m_indices .size() * sizeof(uint32_t));
+                m_indexCount = static_cast<uint32_t>(m_indices.size());
+            } else m_indexCount = 0;
+        }
+        return;
+    }
+
     // Header — "HIERARCHY" + selection count.
     addQuad(x0, top, width, HEADER_H, headerBg);
 
-    // Left divider / resize-edge highlight — drawn AFTER the header band so it
-    // sits on top instead of being covered by it across the top HEADER_H rows.
+    // ▶ collapse toggle on the LEFT side of the header — mirrors the content
+    // browser's ◀ on its right side (each panel's toggle sits on the edge
+    // facing the editor centre).
+    constexpr float TOGGLE_W = 18.0f;
+    m_collapseBtnX = x0;
+    m_collapseBtnY = top;
+    m_collapseBtnW = TOGGLE_W;
+    m_collapseBtnH = HEADER_H;
+    bool tHover = cursorActive
+               && mx >= m_collapseBtnX && mx < m_collapseBtnX + m_collapseBtnW
+               && my >= m_collapseBtnY && my < m_collapseBtnY + m_collapseBtnH;
+    if (tHover) {
+        m_overButton = true;
+        addQuad(m_collapseBtnX, m_collapseBtnY, m_collapseBtnW, m_collapseBtnH, hoverBg);
+    }
+    const glm::vec4 toggleCol{0.78f, 0.80f, 0.86f, 1.0f};
+    addArrow(m_collapseBtnX + TOGGLE_W * 0.5f, m_collapseBtnY + HEADER_H * 0.5f,
+             true, toggleCol);
+
+    std::string hdr = "HIERARCHY";
+    if (m_selected.size() > 1) hdr += "  " + std::to_string(m_selected.size()) + " SEL";
+    addText(x0 + TOGGLE_W + 4.0f, top + std::floor((HEADER_H - PixelFont::CELL_H) * 0.5f),
+            hdr, fsz, m_focused ? rowTxt : labelCol, x0 + width - 4.0f);
+
+    // Left divider / resize-edge highlight — drawn AFTER the header band AND
+    // the collapse-button hover quad so the mint strip stays uninterrupted
+    // across the full panel height.
     if (m_leftEdgeHighlight) {
         const glm::vec4 mint = {0.42f, 1.00f, 0.66f, 1.0f};   // matches the other resize edges
         addQuad(x0, top, 2.0f, height, mint);
     } else {
         addQuad(x0, top, 1.0f, height, border);               // normal divider
     }
-    std::string hdr = "HIERARCHY";
-    if (m_selected.size() > 1) hdr += "  " + std::to_string(m_selected.size()) + " SEL";
-    addText(x0 + 6.0f, top + std::floor((HEADER_H - PixelFont::CELL_H) * 0.5f),
-            hdr, fsz, m_focused ? rowTxt : labelCol, x0 + width - 4.0f);
 
     // Rows.
     const float listTop = top + HEADER_H;
@@ -201,11 +310,19 @@ void SceneHierarchy::update(Registry& registry, float x0, float width, float top
         if (isSelected(m_rows[i].entity)) addQuad(x0 + 1.0f, ry, width - 1.0f, ROW_H, m_focused ? selBg : selDim);
         else if (hover)                   addQuad(x0 + 1.0f, ry, width - 1.0f, ROW_H, hoverBg);
 
-        glm::vec4 ic = (m_rows[i].kind == Kind::Mesh)  ? meshIcon
-                     : (m_rows[i].kind == Kind::Light) ? lightCol : otherCol;
+        const glm::vec4 envIcon{0.42f, 1.00f, 0.66f, 1.0f};   // mint, matches editor accent
+        glm::vec4 ic = (m_rows[i].kind == Kind::Environment) ? envIcon
+                     : (m_rows[i].kind == Kind::Mesh)        ? meshIcon
+                     : (m_rows[i].kind == Kind::Light)       ? lightCol : otherCol;
         addBall(x0 + 10.0f, ry + ROW_H * 0.5f, 3.5f, ic);
         addText(x0 + 18.0f, ry + std::floor((ROW_H - PixelFont::CELL_H) * 0.5f),
                 m_rows[i].label, fsz, rowTxt, maxX);
+    }
+
+    // Drop indicator for the reorder drag — mint 2 px line between rows.
+    if (m_reorderDrag && m_reorderInsertIdx >= 0) {
+        float lineY = listTop + m_reorderInsertIdx * ROW_H - m_scroll - 1.0f;
+        addQuad(x0 + 2.0f, lineY, width - 4.0f, 2.0f, marqLine);
     }
 
     // Marquee box.
@@ -284,23 +401,94 @@ bool SceneHierarchy::handleMouseButton(int button, int action) {
     }
 
     if (mx < m_x0 || mx >= m_x0 + m_w || my < m_top || my >= m_top + m_h) return false;
+    // Collapse toggle has priority over the header-band consume so the click
+    // actually fires the callback before the header swallows it.
+    if (mx >= m_collapseBtnX && mx < m_collapseBtnX + m_collapseBtnW
+     && my >= m_collapseBtnY && my < m_collapseBtnY + m_collapseBtnH) {
+        if (m_onToggleCollapse) m_onToggleCollapse();
+        return true;
+    }
     if (my < m_top + HEADER_H) return true;   // header — consume, no selection
 
-    m_leftDown   = true;
-    m_marquee    = false;
-    m_pressX     = mx; m_pressY = my;
-    m_pressRow   = rowAtY(my);
+    m_leftDown    = true;
+    m_marquee     = false;
+    m_reorderDrag = false;
+    m_reorderInsertIdx = -1;
+    m_pressX      = mx; m_pressY = my;
+    m_pressRow    = rowAtY(my);
     m_pressShift = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT)   == GLFW_PRESS ||
                    glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT)  == GLFW_PRESS;
     m_pressCtrl  = glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
                    glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL)== GLFW_PRESS;
     m_preMarquee = m_selected;
+
+    // Double-click: same row pressed twice in quick succession → activate
+    // (engine frames the camera on the entity). Single-click still selects
+    // via the release path; activation is additive, not exclusive.
+    const double now = glfwGetTime();
+    if (m_pressRow >= 0 && m_pressRow == m_lastClickRow
+        && (now - m_lastClickTime) < DOUBLE_CLICK_S) {
+        if (m_onActivate) m_onActivate(m_rows[m_pressRow].entity);
+        m_lastClickTime = 0.0;     // consume — no triple-click activation
+        m_lastClickRow  = -1;
+    } else {
+        m_lastClickRow  = m_pressRow;
+        m_lastClickTime = now;
+    }
     return true;
+}
+
+void SceneHierarchy::insertAfterSources(const std::vector<Entity>& sources,
+                                         const std::vector<Entity>& fresh) {
+    if (fresh.empty()) return;
+    // Pick the lowest source-row position so when several rows are duplicated
+    // together the whole new block lands right under the bottom one.
+    int landAfter = -1;
+    for (Entity s : sources) {
+        auto it = std::find(m_order.begin(), m_order.end(), s);
+        if (it != m_order.end()) {
+            int idx = static_cast<int>(it - m_order.begin());
+            if (idx > landAfter) landAfter = idx;
+        }
+    }
+    // Drop any of the new entities that are already in m_order (paranoia).
+    std::vector<Entity> toInsert;
+    toInsert.reserve(fresh.size());
+    for (Entity e : fresh)
+        if (std::find(m_order.begin(), m_order.end(), e) == m_order.end())
+            toInsert.push_back(e);
+    if (landAfter < 0)
+        m_order.insert(m_order.end(), toInsert.begin(), toInsert.end());
+    else
+        m_order.insert(m_order.begin() + landAfter + 1,
+                       toInsert.begin(), toInsert.end());
 }
 
 void SceneHierarchy::handleRelease() {
     if (!m_leftDown) return;
-    if (!m_marquee) {
+    if (m_reorderDrag) {
+        // Move the dragged entity in m_order to land at the insert index.
+        if (m_pressRow >= 0 && m_pressRow < static_cast<int>(m_rows.size())) {
+            Entity dragged = m_rows[m_pressRow].entity;
+            // Find the entity that currently sits AT the insert index — once we
+            // remove the dragged entry from m_order, "insert before that entity"
+            // gives us the right landing slot regardless of which way we moved.
+            Entity anchorEnt = NULL_ENTITY;
+            for (int i = m_reorderInsertIdx; i < static_cast<int>(m_rows.size()); ++i) {
+                if (m_rows[i].entity != dragged && m_rows[i].kind != Kind::Environment) {
+                    anchorEnt = m_rows[i].entity;
+                    break;
+                }
+            }
+            m_order.erase(std::remove(m_order.begin(), m_order.end(), dragged), m_order.end());
+            if (anchorEnt == NULL_ENTITY) {
+                m_order.push_back(dragged);
+            } else {
+                auto it = std::find(m_order.begin(), m_order.end(), anchorEnt);
+                m_order.insert(it, dragged);
+            }
+        }
+    } else if (!m_marquee) {
         // Plain click: apply selection rules.
         if (m_pressRow < 0) {
             if (!m_pressShift && !m_pressCtrl) { m_selected.clear(); m_anchor = NULL_ENTITY; }
@@ -312,8 +500,10 @@ void SceneHierarchy::handleRelease() {
             else                                selectSingle(e);
         }
     }
-    m_leftDown = false;
-    m_marquee  = false;
+    m_leftDown    = false;
+    m_marquee     = false;
+    m_reorderDrag = false;
+    m_reorderInsertIdx = -1;
     notifyPrimary();
 }
 
@@ -413,6 +603,17 @@ void SceneHierarchy::addBall(float cx, float cy, float radius, const glm::vec4& 
     for (const glm::vec2& o : off) m_vertices.push_back({{cx + o.x, cy + o.y}, color, o, data0, data1});
     m_indices.push_back(base);     m_indices.push_back(base + 1); m_indices.push_back(base + 2);
     m_indices.push_back(base + 2); m_indices.push_back(base + 3); m_indices.push_back(base);
+}
+
+void SceneHierarchy::addArrow(float cx, float cy, bool right, const glm::vec4& color) {
+    // Same chevron the content browser draws — 7 stacked rows of increasing
+    // then decreasing length, anchored toward the side the arrow points to.
+    for (int r = 0; r < 7; ++r) {
+        float len = 4.0f - std::fabs(static_cast<float>(r - 3));
+        if (len <= 0.0f) continue;
+        float x = right ? (cx - 2.0f) : (cx + 2.0f - len);
+        addQuad(x, cy - 3.0f + r, len, 1.0f, color);
+    }
 }
 
 void SceneHierarchy::addGlyph(float x, float y, char c, float s, const glm::vec4& color) {

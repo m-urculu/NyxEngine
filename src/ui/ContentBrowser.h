@@ -79,6 +79,13 @@ public:
     // to tile the bottom console to the right of the sidebar.
     float currentWidth() const { return m_expanded ? m_width : COLLAPSED_WIDTH; }
 
+    // Persisted layout state — Engine writes these to editor.prefs on shutdown
+    // and reads them back at startup so the collapse + width survive a restart.
+    bool  isExpanded() const { return m_expanded; }
+    float panelWidth() const { return m_width; }
+    void  setExpanded(bool v) { m_expanded = v; }
+    void  setPanelWidth(float w) { m_width = w; }
+
     // Invoked with the file path when a file row is clicked.
     void setFileOpenCallback(std::function<void(const std::string&)> cb) { m_onFileOpen = std::move(cb); }
 

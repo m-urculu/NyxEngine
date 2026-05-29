@@ -29,6 +29,8 @@ std::function<void()> Input::s_onRedo;
 std::function<void(double, double)> Input::s_onViewportPress;
 std::function<void(double)> Input::s_onViewportZoom;
 std::function<bool()> Input::s_onRightDockResize;
+std::function<bool()> Input::s_onHierSplitResize;
+std::function<void()> Input::s_onToggleRightDock;
 
 bool Input::isOrbiting() {
     return s_window
@@ -99,6 +101,11 @@ void Input::update() {
 void Input::keyCallback([[maybe_unused]] GLFWwindow* window, int key,
                          [[maybe_unused]] int scancode,
                          int action, int mods) {
+    // Inspector text-edit captures Enter / Esc / Backspace before Ctrl+S /
+    // Ctrl+Z / scene shortcuts can hijack them.
+    if (s_inspector && s_inspector->capturesKeyboard()) {
+        if (s_inspector->handleKey(key, action, mods)) return;
+    }
     // Content browser gets keys first when it is renaming (captures everything) or
     // focused (Ctrl+C/X/V/Z on the selected file). It returns true if it consumed.
     if (s_contentBrowser && (s_contentBrowser->capturesKeyboard() || s_contentBrowser->isFocused())) {
@@ -130,6 +137,13 @@ void Input::keyCallback([[maybe_unused]] GLFWwindow* window, int key,
         else                       { if (s_onUndo) s_onUndo(); }
         return;
     }
+    // Ctrl+B toggles the right sidebar (Hierarchy + Inspector).
+    if (key == GLFW_KEY_B && action == GLFW_PRESS && (mods & GLFW_MOD_CONTROL)
+        && !(s_editor && s_editor->isFocused())
+        && !(s_contentBrowser && s_contentBrowser->isFocused())) {
+        if (s_onToggleRightDock) s_onToggleRightDock();
+        return;
+    }
     // Esc releases editor focus (back to camera control).
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && s_editor && s_editor->isFocused()) {
         s_editor->setFocused(false);
@@ -139,6 +153,10 @@ void Input::keyCallback([[maybe_unused]] GLFWwindow* window, int key,
 }
 
 void Input::charCallback([[maybe_unused]] GLFWwindow* window, unsigned int codepoint) {
+    if (s_inspector && s_inspector->capturesKeyboard()) {
+        s_inspector->handleChar(codepoint);                 // numeric field entry
+        return;
+    }
     if (s_contentBrowser && s_contentBrowser->capturesKeyboard()) {
         s_contentBrowser->handleChar(codepoint);            // rename text entry
         return;
@@ -161,6 +179,10 @@ void Input::mouseButtonCallback([[maybe_unused]] GLFWwindow* window, int button,
     }
 
     if (action != GLFW_PRESS) return;
+
+    // Any press commits a pending inspector text-edit. Without this, clicks on
+    // other panels would leave the typed value unsaved when the focus shifts.
+    if (s_inspector) s_inspector->commitTextEditOnExternalClick();
 
     // Right-press → content browser context menu. If it lands on the panel, the
     // menu opens, the tree takes keyboard focus, and camera look is suppressed.
@@ -190,6 +212,7 @@ void Input::mouseButtonCallback([[maybe_unused]] GLFWwindow* window, int button,
     // Right-dock resize edge — must run BEFORE hierarchy/inspector so a click on
     // the edge starts a drag instead of picking an entity or scrubbing a field.
     if (s_onRightDockResize && s_onRightDockResize()) return;
+    if (s_onHierSplitResize && s_onHierSplitResize()) return;
     if (s_contentBrowser && s_contentBrowser->handleMouseButton(button, action)) {
         s_contentBrowser->setFocused(true);
         if (s_hierarchy) s_hierarchy->setFocused(false);

@@ -737,6 +737,7 @@ void ContentBrowser::update(float windowWidth, float windowHeight, bool cursorAc
 
     if (!m_expanded) {
         bool railHover = cursorActive && mx >= 0.0 && mx < pw && my >= TOP_OFFSET;
+        if (railHover) m_overButton = true;
         addQuad(0.0f, TOP_OFFSET, pw, HEADER_H, railHover ? hoverBg : headerBg);
         addArrow(pw * 0.5f, TOP_OFFSET + HEADER_H * 0.5f, true, toggleCol);   // ▶ expand
         addQuad(pw - 1.0f, TOP_OFFSET, 1.0f, panelH, border);
@@ -857,7 +858,7 @@ void ContentBrowser::update(float windowWidth, float windowHeight, bool cursorAc
 
         bool tHover = cursorActive && mx >= pw - TOGGLE_W && mx < pw
                       && my >= TOP_OFFSET && my < TOP_OFFSET + HEADER_H;
-        if (tHover) addQuad(pw - TOGGLE_W, TOP_OFFSET, TOGGLE_W, HEADER_H, hoverBg);
+        if (tHover) { m_overButton = true; addQuad(pw - TOGGLE_W, TOP_OFFSET, TOGGLE_W, HEADER_H, hoverBg); }
         addArrow(pw - TOGGLE_W * 0.5f, TOP_OFFSET + HEADER_H * 0.5f, false, toggleCol);  // ◀ collapse
 
         // Right border + resize-edge highlight (full height, incl. the header).

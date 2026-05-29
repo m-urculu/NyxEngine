@@ -99,6 +99,17 @@ void Camera::setAspectRatio(float aspectRatio) {
     m_aspectRatio = aspectRatio;
 }
 
+void Camera::frame(const glm::vec3& center, float radius) {
+    // Distance that fits a `radius` sphere within the vertical FOV with a
+    // small margin so the object isn't pressed against the edge of the view.
+    // For wide aspect ratios this is conservative (horizontal FOV is larger),
+    // which is what we want — guaranteed to fit on any screen.
+    float r       = std::max(0.05f, radius);
+    float halfFov = glm::radians(m_fov * 0.5f);
+    float dist    = (r / std::sin(halfFov)) * 1.25f;
+    m_position    = center - m_front * dist;
+}
+
 void Camera::updateVectors() {
     glm::vec3 front;
     front.x = cos(glm::radians(m_yaw)) * cos(glm::radians(m_pitch));

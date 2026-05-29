@@ -11,6 +11,7 @@
 #include <deque>
 #include "renderer/Buffer.h"
 #include "renderer/Renderer.h"
+#include "renderer/UniformTypes.h"
 
 namespace Nyx {
 
@@ -42,6 +43,14 @@ public:
     // the ShadowMap is constructed; the image is sampled by mesh.frag for PCF compare.
     void setShadowMap(VkDevice device, VkImageView view, VkSampler sampler);
 
+    // Bind the array of cube-map shadow samplers (set 0, binding 2) for all
+    // frames in flight. Called once after the PointShadowMap pool is built;
+    // every slot must be a valid view. mesh.frag indexes into the array per
+    // light using GpuLightData.params.y.
+    void setPointShadowMaps(VkDevice device,
+                            const VkImageView views[MAX_POINT_SHADOWS],
+                            VkSampler sharedSampler);
+
     // The textures bound into a material set. All must be non-null — pass the
     // ResourceCache default (white) texture for any map the material lacks.
     // Normal/metalRough are gated by MaterialParams flags; occlusion defaults to
@@ -54,10 +63,18 @@ public:
     };
 
     // Allocate a material descriptor set: base-color + normal + metal-rough +
-    // occlusion samplers, plus the material UBO (binding 1). The UBO is uploaded
-    // into GPU-local memory via a staging copy (needs the context for the transfer).
+    // occlusion samplers, plus the material UBO (binding 1). By default the
+    // UBO is GPU-only and uploaded once via staging (avoids the GTX 960 stale
+    // read on once-written CPU_TO_GPU UBOs). Set hostVisible = true to use a
+    // CPU_TO_GPU buffer instead — required when the caller wants to mutate
+    // params after allocation (e.g. light gizmo retint). If `outUBO` is
+    // non-null, the Buffer* used by this set is written into it. The pointer
+    // stays valid for the lifetime of the Descriptors instance (deque storage).
     VkDescriptorSet allocateMaterialSet(VulkanContext& context,
-                                        const MaterialMaps& maps, const MaterialParams& params);
+                                        const MaterialMaps& maps,
+                                        const MaterialParams& params,
+                                        bool hostVisible = false,
+                                        Buffer** outUBO = nullptr);
 
     // Free ALL material sets + their UBOs (resets the material pool). Used when a
     // scene is cleared/reloaded so descriptors don't leak. Caller must vkDeviceWaitIdle
@@ -72,7 +89,9 @@ private:
 
     // Material (set 1)
     VkDescriptorSetLayout m_materialLayout = VK_NULL_HANDLE;
-    std::vector<Buffer>   m_materialUBOs; // one per allocated material set
+    // deque (not vector) so Buffer* handed back through allocateMaterialSet's
+    // outUBO param stays stable as the pool grows.
+    std::deque<Buffer>    m_materialUBOs;
 
     // Skinning (set 2): one joint-matrix UBO per skinned mesh. deque → stable
     // addresses so SkinComponent's Buffer* stays valid as more are allocated.

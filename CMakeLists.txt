@@ -88,6 +88,7 @@ set(ENGINE_SOURCES
     src/renderer/GltfLoader.cpp
     src/renderer/ResourceCache.cpp
     src/renderer/ShadowMap.cpp
+    src/renderer/PointShadowMap.cpp
     src/renderer/HdrTarget.cpp
     src/renderer/BloomPass.cpp
     src/scene/Camera.cpp
@@ -130,9 +131,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     tree_sitter
 )
 
-# Win32 COM for the native folder picker (IFileOpenDialog).
+# Win32 COM for the native folder picker (IFileOpenDialog) + DWM for the
+# Windows 11 corner-preference attribute (sharp window corners).
 if(WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE ole32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ole32 dwmapi)
 endif()
 
 # Build as a GUI (WINDOWS subsystem) app so launching the engine does NOT spawn a

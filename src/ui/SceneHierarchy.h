@@ -47,9 +47,21 @@ public:
     void setSelectCallback(std::function<void(Entity)> cb)  { m_onSelect  = std::move(cb); }
     void setCommandCallback(std::function<void(Command)> cb) { m_onCommand = std::move(cb); }
 
+    // Fired when a row is double-clicked. Engine uses this to frame the
+    // camera on the entity (same idea as Unity's "F" or Maya's "F" key).
+    void setActivateCallback(std::function<void(Entity)> cb) { m_onActivate = std::move(cb); }
+    // Click on the in-header ◀ collapse toggle → flip the right-dock state.
+    void setCollapseCallback(std::function<void()> cb) { m_onToggleCollapse = std::move(cb); }
+
     // Engine-driven selection (spawn/paste select the new entities).
     void setSelection(const std::vector<Entity>& sel);
     const std::vector<Entity>& selection() const { return m_selected; }
+
+    // Splice newly-created entities into the manual order right after the
+    // lowest of their source entities. Used by Duplicate so a duped row lands
+    // right below its source instead of at the bottom of the list.
+    void insertAfterSources(const std::vector<Entity>& sources,
+                            const std::vector<Entity>& fresh);
 
     void setFocused(bool f) { m_focused = f; }
     bool isFocused() const  { return m_focused; }
@@ -60,10 +72,19 @@ public:
     // Engine sets this each frame so the right-dock resize edge gets a mint
     // highlight strip drawn on the panel's left side while hovered/dragged.
     void setLeftEdgeHighlight(bool h) { m_leftEdgeHighlight = h; }
+    // When true, the panel renders as a thin vertical rail with a ▶ expand
+    // chevron — same pattern the content browser uses when collapsed.
+    void setCollapsedRail(bool c) { m_collapsedRail = c; }
+    // True while the cursor is over the in-header collapse arrow (expanded
+    // mode) or anywhere on the collapsed rail. Engine OR's it with the other
+    // panels' wantsPointerCursor flags to swap to the hand cursor.
+    bool wantsPointerCursor() const { return m_overButton; }
 
 private:
     bool m_leftEdgeHighlight = false;
-    enum class Kind { Mesh, Light, Other };
+    bool m_collapsedRail     = false;
+    bool m_overButton        = false;   // re-tested every update()
+    enum class Kind { Mesh, Light, Environment, Other };
     struct Row { Entity entity; std::string label; Kind kind; };
 
     // 1px-quad text overflows small buffers; over-capacity geometry is dropped.
@@ -82,6 +103,18 @@ private:
     float               m_scroll      = 0.0f;
     std::function<void(Entity)>  m_onSelect;
     std::function<void(Command)> m_onCommand;
+    std::function<void(Entity)>  m_onActivate;
+    std::function<void()>        m_onToggleCollapse;
+
+    // Cached hit-rect of the in-header ◀ collapse button — recomputed each
+    // update() so handleMouseButton can act on it.
+    float m_collapseBtnX = 0.0f, m_collapseBtnY = 0.0f, m_collapseBtnW = 0.0f, m_collapseBtnH = 0.0f;
+
+    // Double-click latch: same row pressed within DOUBLE_CLICK_S of the
+    // previous press fires m_onActivate.
+    int    m_lastClickRow  = -1;
+    double m_lastClickTime = 0.0;
+    static constexpr double DOUBLE_CLICK_S = 0.4;
 
     // Press / marquee state.
     bool   m_leftDown    = false;
@@ -91,6 +124,18 @@ private:
     int    m_pressRow   = -1;
     bool   m_pressShift = false, m_pressCtrl = false;
     std::vector<Entity> m_preMarquee;               // base set for Ctrl+marquee union
+
+    // Manual sibling order. Entities are kept in this vector in the order the
+    // user wants them displayed; new entities get appended at the end. The
+    // Environment singleton is not in here — buildRows always pins it to the
+    // top regardless of order.
+    std::vector<Entity> m_order;
+
+    // Drag-to-reorder state. A press on a row that moves past the marquee
+    // threshold starts a reorder drag instead of a rubber-band marquee.
+    // m_reorderInsertIdx is the m_rows index the dragged row would land at.
+    bool m_reorderDrag      = false;
+    int  m_reorderInsertIdx = -1;
 
     // Right-click context menu.
     struct MenuItem { std::string label; Command cmd; };
@@ -121,6 +166,7 @@ private:
     void  addQuad(float x, float y, float w, float h, const glm::vec4& color);
     void  addBall(float cx, float cy, float radius, const glm::vec4& color);
     void  addGlyph(float x, float y, char c, float s, const glm::vec4& color);
+    void  addArrow(float cx, float cy, bool right, const glm::vec4& color);
     float addText(float x, float y, const std::string& text, float s, const glm::vec4& color, float maxX);
 };
 

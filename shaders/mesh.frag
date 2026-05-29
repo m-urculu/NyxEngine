@@ -29,10 +29,32 @@ layout(set = 0, binding = 0) uniform UniformBufferObject {
 } ubo;
 
 // Sun shadow map (depth texture, written each frame from the sun's POV). Sampled
-// only for directional lights; point lights skip shadows (would need cubemaps).
-// sampler2DShadow + a comparison sampler does hardware bilinear PCF compare in one
-// texture() call — ~9× cheaper than software 3×3 PCF for equivalent softness.
+// only for directional lights. sampler2DShadow + a comparison sampler does
+// hardware bilinear PCF compare in one texture() call.
 layout(set = 0, binding = 1) uniform sampler2DShadow shadowMap;
+
+// Point-light shadow cubes. Each cube stores linear distance from the light to
+// the nearest surface, normalised by the light's radius. mesh.frag picks one
+// per shadowed point light via params.y; -1 means "no shadow".
+#define MAX_POINT_SHADOWS 4
+layout(set = 0, binding = 2) uniform samplerCube pointShadowCubes[MAX_POINT_SHADOWS];
+
+// Manual cube shadow compare. dir = fragment - light, normalised by radius.
+// Sample the cube with the world-space direction; compare the stored linear
+// distance against the actual one (with a small bias). Returns 0 = in shadow,
+// 1 = lit.
+float samplePointShadow(int shadowIdx, vec3 fragWp, vec3 lightWp, float radius) {
+    vec3  toFrag = fragWp - lightWp;
+    float refDist = length(toFrag) / max(radius, 1e-4);
+    float stored = 1.0;
+    // GLSL requires constant indexing into sampler arrays on some hardware, so
+    // dispatch by switch over the small fixed set.
+    if      (shadowIdx == 0) stored = texture(pointShadowCubes[0], toFrag).r;
+    else if (shadowIdx == 1) stored = texture(pointShadowCubes[1], toFrag).r;
+    else if (shadowIdx == 2) stored = texture(pointShadowCubes[2], toFrag).r;
+    else                     stored = texture(pointShadowCubes[3], toFrag).r;
+    return refDist - 0.01 > stored ? 0.0 : 1.0;
+}
 
 // Sample the sky gradient by direction — fast variant used for IBL shading only
 // (the visible skybox in sky.frag keeps the smoother smoothstep version). For the
@@ -185,10 +207,14 @@ void main() {
         if (NdotL <= 0.0) continue;
 
         vec3 radiance = light.colorAndIntensity.xyz * light.colorAndIntensity.w * pointFalloff;
-        // Only directional lights cast shadows here (point lights would need cubemap
-        // shadows — out of scope for this iteration).
         if (light.positionAndType.w < 0.5) {
             radiance *= sampleShadow(fragWorldPos);
+        } else {
+            int shadowIdx = int(light.params.y);
+            if (shadowIdx >= 0) {
+                radiance *= samplePointShadow(shadowIdx, fragWorldPos,
+                                              light.positionAndType.xyz, light.params.x);
+            }
         }
 
         vec3  H   = normalize(V + L);

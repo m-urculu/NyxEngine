@@ -7,6 +7,7 @@
 #include <memory>
 #include "renderer/HdrTarget.h"
 #include "renderer/BloomPass.h"
+#include "renderer/PointShadowMap.h"
 
 namespace Nyx {
 
@@ -38,6 +39,9 @@ public:
     bool drawFrame(VulkanContext& context, Swapchain& swapchain, Pipeline& pipeline,
                     Registry& registry, Descriptors& descriptors,
                     ShadowMap* shadowMap = nullptr,
+                    PointShadowMap* pointShadowPool = nullptr,
+                    const PointShadowJob* pointShadowJobs = nullptr,
+                    size_t pointShadowJobCount = 0,
                     UIPipeline* uiPipeline = nullptr, TitleBar* titleBar = nullptr,
                     ContentBrowser* contentBrowser = nullptr, Console* console = nullptr,
                     CodeEditor* editor = nullptr,
@@ -91,6 +95,7 @@ private:
                              Swapchain& swapchain, Pipeline& pipeline,
                              Registry& registry, Descriptors& descriptors,
                              ShadowMap* shadowMap,
+                             PointShadowMap* pointShadowPool, const PointShadowJob* pointShadowJobs, size_t pointShadowJobCount,
                              UIPipeline* uiPipeline, TitleBar* titleBar,
                              ContentBrowser* contentBrowser, Console* console, CodeEditor* editor,
                              ImagePipeline* imagePipeline, MaterialPreviewPipeline* matPipeline,

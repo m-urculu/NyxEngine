@@ -8,6 +8,7 @@
 #include "renderer/Descriptors.h"
 #include "renderer/DepthBuffer.h"
 #include "renderer/UniformTypes.h"
+#include "ecs/components/EnvironmentComponent.h"
 #include "ui/UIPipeline.h"
 #include "ui/TitleBar.h"
 #include "ui/ContentBrowser.h"
@@ -21,6 +22,9 @@
 #include "ecs/Registry.h"
 #include "ecs/components/TransformComponent.h"
 #include "ecs/components/MeshComponent.h"
+#include "ecs/components/LightComponent.h"
+
+#include <cstring>
 #include "ecs/components/MaterialComponent.h"
 #include "ecs/components/SkinComponent.h"
 #include "Logger.h"
@@ -123,6 +127,9 @@ void Renderer::waitIdle(VkDevice device) {
 bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain,
                           Pipeline& pipeline, Registry& registry, Descriptors& descriptors,
                           ShadowMap* shadowMap,
+                          PointShadowMap* pointShadowPool,
+                          const PointShadowJob* pointShadowJobs,
+                          size_t pointShadowJobCount,
                           UIPipeline* uiPipeline, TitleBar* titleBar,
                           ContentBrowser* contentBrowser, Console* console, CodeEditor* editor,
                           ImagePipeline* imagePipeline, MaterialPreviewPipeline* matPipeline,
@@ -152,7 +159,11 @@ bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain,
     vkResetFences(device, 1, &m_inFlightFences[m_currentFrame]);
 
     vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
-    recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, swapchain, pipeline, registry, descriptors, shadowMap, uiPipeline, titleBar, contentBrowser, console, editor, imagePipeline, matPipeline, hierarchy, inspector, gizmo);
+    recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, swapchain, pipeline,
+                        registry, descriptors, shadowMap,
+                        pointShadowPool, pointShadowJobs, pointShadowJobCount,
+                        uiPipeline, titleBar, contentBrowser, console, editor,
+                        imagePipeline, matPipeline, hierarchy, inspector, gizmo);
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -366,6 +377,9 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
                                     Swapchain& swapchain, Pipeline& pipeline,
                                     Registry& registry, Descriptors& descriptors,
                                     ShadowMap* shadowMap,
+                                    PointShadowMap* pointShadowPool,
+                                    const PointShadowJob* pointShadowJobs,
+                                    size_t pointShadowJobCount,
                                     UIPipeline* uiPipeline, TitleBar* titleBar,
                                     ContentBrowser* contentBrowser, Console* console, CodeEditor* editor,
                                     ImagePipeline* imagePipeline, MaterialPreviewPipeline* matPipeline,
@@ -396,6 +410,9 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
             const MeshComponent& mc = meshPool[i];
             if (!mc.mesh) continue;
             if (!registry.has<TransformComponent>(entity)) continue;
+            // Light gizmo sphere — visual marker, not real geometry. Skip the
+            // shadow pass so it doesn't drop a shadow under the light itself.
+            if (registry.has<LightComponent>(entity)) continue;
 
             const bool isCutout  = registry.has<MaterialComponent>(entity)
                                 && registry.get<MaterialComponent>(entity).alphaCutoff > 0.0f;
@@ -411,6 +428,53 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
             mc.mesh->draw(commandBuffer);
         }
         shadowMap->endRenderPass(commandBuffer);
+    }
+
+    // ── Point-light shadow passes ───────────────────────────────────────────────
+    // For each enabled point-shadow job, render the scene 6 times into the cube
+    // map's faces using the engine-computed viewProj matrices. Linear distance
+    // from the light is written to R32_SFLOAT via VK_BLEND_OP_MIN — no depth.
+    if (pointShadowPool && pointShadowJobs && pointShadowJobCount > 0) {
+        struct PointShadowPC {
+            float viewProj[16];
+            float model[16];
+            float lightPosAndFar[4];
+        };
+        for (size_t j = 0; j < pointShadowJobCount; ++j) {
+            const PointShadowJob& job = pointShadowJobs[j];
+            PointShadowMap& sm = pointShadowPool[job.slot];
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, sm.getPipeline());
+            for (uint32_t f = 0; f < 6; ++f) {
+                sm.beginFace(commandBuffer, f);
+                auto& meshPool = registry.pool<MeshComponent>();
+                for (size_t i = 0; i < meshPool.size(); i++) {
+                    Entity entity = meshPool.getEntity(i);
+                    const MeshComponent& mc = meshPool[i];
+                    if (!mc.mesh) continue;
+                    if (!registry.has<TransformComponent>(entity)) continue;
+                    if (registry.has<LightComponent>(entity)) continue;   // skip gizmos
+                    const bool isCutout  = registry.has<MaterialComponent>(entity)
+                                        && registry.get<MaterialComponent>(entity).alphaCutoff > 0.0f;
+                    const bool isSkinned = registry.has<SkinComponent>(entity)
+                                        && registry.get<SkinComponent>(entity).jointSet != VK_NULL_HANDLE;
+                    if (isCutout || isSkinned) continue;
+
+                    PointShadowPC pc{};
+                    std::memcpy(pc.viewProj, &job.viewProj[f], sizeof(pc.viewProj));
+                    glm::mat4 model = registry.get<TransformComponent>(entity).worldMatrix;
+                    std::memcpy(pc.model, &model, sizeof(pc.model));
+                    pc.lightPosAndFar[0] = job.lightPos.x;
+                    pc.lightPosAndFar[1] = job.lightPos.y;
+                    pc.lightPosAndFar[2] = job.lightPos.z;
+                    pc.lightPosAndFar[3] = job.farRadius;
+                    vkCmdPushConstants(commandBuffer, sm.getPipelineLayout(),
+                                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       0, sizeof(pc), &pc);
+                    mc.mesh->draw(commandBuffer);
+                }
+                sm.endFace(commandBuffer);
+            }
+        }
     }
 
     // ── Scene render pass (HDR linear target) ───────────────────────────────────
@@ -560,8 +624,15 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
     // End of scene RP — m_hdrTarget transitions to SHADER_READ_ONLY via subpass dep.
     vkCmdEndRenderPass(commandBuffer);
 
+    // ── Resolve EnvironmentComponent so bloom + composite use editor-driven values.
+    EnvironmentComponent env{};   // defaults if no env entity exists
+    {
+        auto& envPool = registry.pool<EnvironmentComponent>();
+        if (envPool.size() > 0) env = envPool[0];
+    }
+
     // ── Bloom: downsample brightpass from HDR → mip chain → upsample tent → mip 0
-    if (m_bloomPass) m_bloomPass->render(commandBuffer);
+    if (m_bloomPass) m_bloomPass->render(commandBuffer, env.bloomThreshold, env.bloomKnee);
 
     // ── Composite render pass: tonemap HDR + bloom → swapchain, then UI overlay ─
     {
@@ -593,6 +664,18 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.getCompositePipeline());
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipeline.getCompositePipelineLayout(), 0, 1, &m_compositeSet, 0, nullptr);
+
+        // Push live bloom strength + exposure + tonemap mode from the environment.
+        struct CompositePC { float bloomStrength; float exposure; float tonemap; float pad; };
+        CompositePC cpc{
+            env.bloomStrength,
+            env.exposure,
+            static_cast<float>(static_cast<uint32_t>(env.tonemapper)),
+            0.0f,
+        };
+        vkCmdPushConstants(commandBuffer, pipeline.getCompositePipelineLayout(),
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(cpc), &cpc);
+
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
 

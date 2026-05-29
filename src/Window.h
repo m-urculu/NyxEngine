@@ -54,6 +54,13 @@ public:
     // slashes) or "" if cancelled / unsupported.
     std::string openFolderDialog(const std::string& title = "Open Folder");
 
+    // Hook called from the WndProc on WM_SIZE / WM_WINDOWPOSCHANGED so the
+    // engine can render mid-drag (Windows blocks the main thread in a modal
+    // resize loop, so glfwPollEvents wouldn't return until release without
+    // this). Engine registers a callback that recreates the swapchain if the
+    // size changed and draws one frame.
+    static void setLiveResizeCallback(std::function<void()> cb);
+
 private:
     GLFWwindow* m_window = nullptr;
     int m_width = 0;

@@ -9,7 +9,8 @@
 
 namespace Nyx {
 
-constexpr int MAX_LIGHTS = 8;
+constexpr int MAX_LIGHTS         = 8;
+constexpr int MAX_POINT_SHADOWS  = 4;     // cube map slots for point-light shadows
 constexpr int MAX_JOINTS = 128;  // per-skin joint-matrix count (must match mesh_skinned.vert)
                                  // 128 mat4 = 8 KB UBO, safely under Vulkan's 16 KB min guarantee
 

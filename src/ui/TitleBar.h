@@ -12,6 +12,7 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <array>
+#include <functional>
 #include <string>
 
 namespace Nyx {

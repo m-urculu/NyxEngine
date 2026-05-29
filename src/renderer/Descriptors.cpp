@@ -58,9 +58,11 @@ void Descriptors::cleanup(VkDevice device, VmaAllocator allocator) {
 }
 
 void Descriptors::createGlobalLayout(VkDevice device) {
-    // Binding 0 = the global UBO (view/proj/lights/sky/lightSpace). Binding 1 = the
-    // sun shadow map sampler (fragment stage only — vertex shaders don't sample it).
-    std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+    // Binding 0 = the global UBO (view/proj/lights/sky/lightSpace).
+    // Binding 1 = the sun shadow map sampler (fragment stage only).
+    // Binding 2 = an array of MAX_POINT_SHADOWS cube maps for point-light
+    //             shadows, sampled by mesh.frag via samplerCube[shadowIndex].
+    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
     bindings[0].binding            = 0;
     bindings[0].descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount    = 1;
@@ -69,6 +71,10 @@ void Descriptors::createGlobalLayout(VkDevice device) {
     bindings[1].descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[1].descriptorCount    = 1;
     bindings[1].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[2].binding            = 2;
+    bindings[2].descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[2].descriptorCount    = MAX_POINT_SHADOWS;
+    bindings[2].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -128,13 +134,14 @@ void Descriptors::createJointLayout(VkDevice device) {
 }
 
 void Descriptors::createPool(VkDevice device) {
-    // Global pool (set 0): one UBO + one shadow sampler per frame in flight.
+    // Global pool (set 0): one UBO + one sun shadow sampler + MAX_POINT_SHADOWS
+    // cube-map samplers per frame in flight.
     {
         std::array<VkDescriptorPoolSize, 2> sizes{};
         sizes[0].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[0].descriptorCount = Renderer::MAX_FRAMES_IN_FLIGHT;
         sizes[1].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sizes[1].descriptorCount = Renderer::MAX_FRAMES_IN_FLIGHT;
+        sizes[1].descriptorCount = Renderer::MAX_FRAMES_IN_FLIGHT * (1 + MAX_POINT_SHADOWS);
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -248,8 +255,31 @@ void Descriptors::setShadowMap(VkDevice device, VkImageView view, VkSampler samp
     }
 }
 
+void Descriptors::setPointShadowMaps(VkDevice device,
+                                      const VkImageView views[MAX_POINT_SHADOWS],
+                                      VkSampler sharedSampler) {
+    for (int i = 0; i < Renderer::MAX_FRAMES_IN_FLIGHT; ++i) {
+        VkDescriptorImageInfo infos[MAX_POINT_SHADOWS]{};
+        for (int s = 0; s < MAX_POINT_SHADOWS; ++s) {
+            infos[s].imageView   = views[s];
+            infos[s].sampler     = sharedSampler;
+            infos[s].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        VkWriteDescriptorSet w{};
+        w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet          = m_globalSets[i];
+        w.dstBinding      = 2;
+        w.dstArrayElement = 0;
+        w.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.descriptorCount = MAX_POINT_SHADOWS;
+        w.pImageInfo      = infos;
+        vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+    }
+}
+
 VkDescriptorSet Descriptors::allocateMaterialSet(VulkanContext& context,
-                                                  const MaterialMaps& maps, const MaterialParams& params) {
+                                                  const MaterialMaps& maps, const MaterialParams& params,
+                                                  bool hostVisible, Buffer** outUBO) {
     VkDevice device       = context.getDevice();
     VmaAllocator allocator = context.getAllocator();
 
@@ -264,19 +294,29 @@ VkDescriptorSet Descriptors::allocateMaterialSet(VulkanContext& context,
         throw std::runtime_error("Failed to allocate material descriptor set");
     }
 
-    // Per-material UBO in GPU-local memory, filled via a staging copy (same path as
-    // meshes). Avoids host-visible coherency issues seen with once-written UBOs.
+    // Per-material UBO. Default = GPU-only via staging (same path as meshes;
+    // avoids the GTX 960 stale read on once-written CPU_TO_GPU UBOs). When
+    // hostVisible is requested (e.g. light gizmo), use CPU_TO_GPU instead so
+    // the caller can mutate the buffer per frame via Buffer::uploadData.
     m_materialUBOs.emplace_back();
     Buffer& matUBO = m_materialUBOs.back();
-    matUBO.init(allocator, sizeof(MaterialParams),
-                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                VMA_MEMORY_USAGE_GPU_ONLY);
-    Buffer staging;
-    staging.init(allocator, sizeof(MaterialParams),
-                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-    staging.uploadData(allocator, &params, sizeof(MaterialParams));
-    Buffer::copyBuffer(context, staging.getBuffer(), matUBO.getBuffer(), sizeof(MaterialParams));
-    staging.cleanup(allocator);
+    if (hostVisible) {
+        matUBO.init(allocator, sizeof(MaterialParams),
+                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                    VMA_MEMORY_USAGE_CPU_TO_GPU);
+        matUBO.uploadData(allocator, &params, sizeof(MaterialParams));
+    } else {
+        matUBO.init(allocator, sizeof(MaterialParams),
+                    VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                    VMA_MEMORY_USAGE_GPU_ONLY);
+        Buffer staging;
+        staging.init(allocator, sizeof(MaterialParams),
+                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+        staging.uploadData(allocator, &params, sizeof(MaterialParams));
+        Buffer::copyBuffer(context, staging.getBuffer(), matUBO.getBuffer(), sizeof(MaterialParams));
+        staging.cleanup(allocator);
+    }
+    if (outUBO) *outUBO = &matUBO;
 
     auto imgInfo = [](Texture* t) {
         VkDescriptorImageInfo i{};

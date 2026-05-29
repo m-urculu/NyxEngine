@@ -63,6 +63,10 @@ public:
     // drag. Routed BEFORE the hierarchy/inspector dispatch so the click doesn't
     // also pick an entity or scrub a field. Returns true if consumed.
     static void setRightDockResizeCallback(std::function<bool()> cb) { s_onRightDockResize = std::move(cb); }
+    // Same idea for the horizontal split between Hierarchy and Inspector.
+    static void setHierSplitResizeCallback(std::function<bool()> cb) { s_onHierSplitResize = std::move(cb); }
+    // Ctrl+B toggles the right sidebar (collapse / expand).
+    static void setToggleRightDockCallback(std::function<void()> cb) { s_onToggleRightDock = std::move(cb); }
 
     // True when the code editor has keyboard focus (suppresses camera WASD).
     static bool isTextInputActive();
@@ -92,6 +96,8 @@ private:
     static std::function<void(double, double)> s_onViewportPress;
     static std::function<void(double)> s_onViewportZoom;
     static std::function<bool()> s_onRightDockResize;
+    static std::function<bool()> s_onHierSplitResize;
+    static std::function<void()> s_onToggleRightDock;
 
     static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
     static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);

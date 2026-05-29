@@ -668,10 +668,18 @@ void Pipeline::createCompositePipeline(VkDevice device) {
     ds.depthWriteEnable = VK_FALSE;
     ds.depthCompareOp   = VK_COMPARE_OP_ALWAYS;
 
+    // 4 floats: bloomStrength, exposure, tonemap mode, pad. Drives composite.frag.
+    VkPushConstantRange pcRange{};
+    pcRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pcRange.offset     = 0;
+    pcRange.size       = sizeof(float) * 4;
+
     VkPipelineLayoutCreateInfo li{};
-    li.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    li.setLayoutCount = 1;
-    li.pSetLayouts    = &m_compositeSetLayout;
+    li.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    li.setLayoutCount         = 1;
+    li.pSetLayouts            = &m_compositeSetLayout;
+    li.pushConstantRangeCount = 1;
+    li.pPushConstantRanges    = &pcRange;
     if (vkCreatePipelineLayout(device, &li, nullptr, &m_compositeLayout) != VK_SUCCESS)
         throw std::runtime_error("Failed to create composite pipeline layout");
 

@@ -9,10 +9,12 @@
 namespace Nyx {
 
 class Texture;
+class Buffer;
 
 struct MaterialComponent {
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
-    Texture* texture = nullptr; // non-owning
+    Texture* texture     = nullptr;     // non-owning
+    Buffer*  materialUBO = nullptr;     // non-owning; non-null only for host-visible (re-uploadable) sets
 
     // PBR-ish parameters
     glm::vec4 baseColorFactor{1.0f, 1.0f, 1.0f, 1.0f};

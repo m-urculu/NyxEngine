@@ -3,6 +3,7 @@
 #include "Input.h"
 #include "renderer/Vertex.h"
 #include "renderer/UniformTypes.h"
+#include "renderer/Buffer.h"
 #include "renderer/ObjLoader.h"
 #include "renderer/GltfLoader.h"
 #include "renderer/Texture.h"
@@ -12,6 +13,7 @@
 #include "ecs/components/MaterialComponent.h"
 #include "ecs/components/LightComponent.h"
 #include "ecs/components/SkinComponent.h"
+#include "ecs/components/EnvironmentComponent.h"
 #include "ecs/systems/TransformSystem.h"
 
 #include <GLFW/glfw3.h>
@@ -64,6 +66,35 @@ void makePlane(std::vector<Vertex>& v, std::vector<uint32_t>& idx) {
     // above. The original {0,1,2, 2,3,0} order produced a downward normal — the plane
     // was visible only from below and transparent from above.
     idx = {0, 2, 1, 2, 0, 3};
+}
+// UV sphere — used as the visible gizmo for point lights so they aren't an
+// invisible dot in the scene view. Diameter ~0.4 (small enough to read as a
+// gizmo but big enough to hover/click for selection); shaded by the regular
+// PBR pipeline so it picks up the surrounding lighting.
+void makeSphere(std::vector<Vertex>& v, std::vector<uint32_t>& idx) {
+    const int   LATS = 8;
+    const int   LONS = 12;
+    const float R    = 0.2f;
+    constexpr float kPi = 3.14159265358979323846f;
+    const glm::vec3 col{1.0f, 1.0f, 1.0f};
+    for (int i = 0; i <= LATS; ++i) {
+        float t   = (float)i / (float)LATS;
+        float phi = kPi * t;                          // 0..π
+        float sp = std::sin(phi), cp = std::cos(phi);
+        for (int j = 0; j <= LONS; ++j) {
+            float u   = (float)j / (float)LONS;
+            float th  = (2.0f * kPi) * u;              // 0..2π
+            glm::vec3 n{sp * std::cos(th), cp, sp * std::sin(th)};
+            v.push_back({R * n, n, col, {u, t}});
+        }
+    }
+    for (int i = 0; i < LATS; ++i) {
+        for (int j = 0; j < LONS; ++j) {
+            uint32_t a = (uint32_t)(i       * (LONS + 1) + j);
+            uint32_t b = (uint32_t)((i + 1) * (LONS + 1) + j);
+            idx.insert(idx.end(), {a, b, a + 1, a + 1, b, b + 1});
+        }
+    }
 }
 void makeCube(std::vector<Vertex>& v, std::vector<uint32_t>& idx) {
     const glm::vec3 c{1.0f, 1.0f, 1.0f};
@@ -135,6 +166,9 @@ Engine::Engine() = default;
 Engine::~Engine() {
     m_renderer.waitIdle(m_vulkanContext.getDevice());
 
+    // Persist editor layout (collapse + sizes) before tearing things down.
+    saveEditorPrefs();
+
     m_editor.cleanup(m_vulkanContext.getAllocator());
     m_gizmo.cleanup(m_vulkanContext.getAllocator());
     m_inspector.cleanup(m_vulkanContext.getAllocator());
@@ -148,6 +182,8 @@ Engine::~Engine() {
     m_resourceCache.cleanup(m_vulkanContext);
     m_renderer.cleanup(m_vulkanContext.getDevice(), m_vulkanContext.getAllocator());
     m_shadowMap.cleanup(m_vulkanContext.getDevice(), m_vulkanContext.getAllocator());
+    for (auto& sm : m_pointShadows)
+        sm.cleanup(m_vulkanContext.getDevice(), m_vulkanContext.getAllocator());
     m_pipeline.cleanup(m_vulkanContext.getDevice());
     m_descriptors.cleanup(m_vulkanContext.getDevice(), m_vulkanContext.getAllocator());
     m_swapchain.cleanup(m_vulkanContext.getDevice(), m_vulkanContext.getAllocator());
@@ -191,6 +227,25 @@ void Engine::init(StatusFn onStatus) {
     m_descriptors.setShadowMap(m_vulkanContext.getDevice(),
                                m_shadowMap.getView(), m_shadowMap.getSampler());
 
+    // Point-light shadow cube map pool. Each slot starts at the default
+    // resolution; gets rebuilt at the requested per-light tier when assigned.
+    status("Preparing point shadow maps...", 0.40f);
+    for (auto& sm : m_pointShadows) sm.init(m_vulkanContext, m_descriptors.getGlobalLayout());
+    {
+        VkImageView views[MAX_POINT_SHADOWS]{};
+        for (int s = 0; s < MAX_POINT_SHADOWS; ++s) views[s] = m_pointShadows[s].getCubeView();
+        m_descriptors.setPointShadowMaps(m_vulkanContext.getDevice(),
+                                         views, m_pointShadows[0].getSampler());
+    }
+    // Prime each cube map (transitions every face to SHADER_READ_ONLY_OPTIMAL
+    // so the descriptor binding's expected layout is correct before any light
+    // ever writes to it).
+    {
+        VkCommandBuffer cmd = m_vulkanContext.beginSingleTimeCommands();
+        for (auto& sm : m_pointShadows) sm.prime(cmd);
+        m_vulkanContext.endSingleTimeCommands(cmd);
+    }
+
     status("Setting up renderer...", 0.45f);
     m_renderer.init(m_vulkanContext, m_swapchain, m_pipeline);
 
@@ -209,6 +264,11 @@ void Engine::init(StatusFn onStatus) {
     m_hierarchy.init(m_vulkanContext.getAllocator(), m_window->getHandle());
     m_inspector.init(m_vulkanContext.getAllocator(), m_window->getHandle());
     m_gizmo.init(m_vulkanContext.getAllocator());
+
+    // Restore the last session's layout (collapse states + panel sizes) so the
+    // user picks up where they left off. Failures are silent — first launch on
+    // a project has no editor.prefs.
+    loadEditorPrefs();
 
     // Dev console commands (help / clear are built in).
     const glm::vec4 errCol{0.96f, 0.42f, 0.40f, 1.0f};
@@ -288,6 +348,11 @@ void Engine::init(StatusFn onStatus) {
             case SceneHierarchy::Command::Duplicate: duplicateSelection(); break;
         }
     });
+    // Double-click in the hierarchy → camera frames the entity (Maya/Unity "F").
+    m_hierarchy.setActivateCallback([this](Entity e) { frameEntity(e); });
+    // ◀ button in the hierarchy header collapses the right sidebar (same toggle
+    // as Ctrl+B and the title-bar button).
+    m_hierarchy.setCollapseCallback([this]() { toggleRightDockCollapsed(); });
     // Inspector material slot: click assigns the content browser's current selection;
     // dragging a .png/.mat from the content browser onto the slot assigns that path.
     m_inspector.setAssignRequestCallback([this]() {
@@ -307,6 +372,22 @@ void Engine::init(StatusFn onStatus) {
     });
     m_inspector.setOnEditCallback([this]() { m_sceneDirty = true; });
     m_inspector.setEndEditCallback([this]() { endTransformUndo(); });
+    // Color edits get a per-field delta: begin captures (entity, target,
+    // pre-edit color), end captures the post-edit color and pushes a single
+    // small UndoAction::Kind::Color. Undo writes the old color back to just
+    // that one field — no scene reload, no other state touched.
+    m_inspector.setBeginColorEditCallback([this](Entity e, Inspector::PickerField t) {
+        beginColorUndo(e, t);
+    });
+    m_inspector.setEndColorEditCallback([this](Entity e, Inspector::PickerField t) {
+        endColorUndo(e, t);
+    });
+    m_inspector.setBeginScalarEditCallback([this](Entity e, Inspector::ScalarField t) {
+        beginScalarUndo(e, t);
+    });
+    m_inspector.setEndScalarEditCallback([this](Entity e, Inspector::ScalarField t) {
+        endScalarUndo(e, t);
+    });
     m_inspector.setAnimToggleCallback([this]() { m_animPlaying = !m_animPlaying; });
     m_contentBrowser.setExternalDropCallback([this](const std::string& path, double mx, double my) {
         // A model dropped anywhere outside the browser → add it to the scene.
@@ -332,6 +413,12 @@ void Engine::init(StatusFn onStatus) {
         m_rightDockResizing = true;
         return true;
     });
+    Input::setHierSplitResizeCallback([this]() {
+        if (!overHierSplitEdge()) return false;
+        m_hierSplitResizing = true;
+        return true;
+    });
+    Input::setToggleRightDockCallback([this]() { toggleRightDockCollapsed(); });
 
     float aspect = static_cast<float>(m_window->getWidth()) / static_cast<float>(m_window->getHeight());
     m_camera.init({0.0f, 2.0f, 6.0f}, aspect);
@@ -372,6 +459,10 @@ void Engine::init(StatusFn onStatus) {
 
 void Engine::run() {
     LOG_INFO("Entering main loop");
+
+    // Wire the WndProc's live-resize hook so dragging a window edge repaints
+    // continuously instead of waiting for the modal resize loop to exit.
+    Window::setLiveResizeCallback([this]() { renderOneFrame(); });
 
     // Reveal the main window now that the editor is fully initialised. Created
     // hidden in Window — see GLFW_VISIBLE hint — so the splash owns the screen
@@ -429,9 +520,22 @@ void Engine::run() {
                 glfwGetCursorPos(m_window->getHandle(), &mx, &my);
                 m_rightDockWidth = std::clamp(winW - static_cast<float>(mx),
                                               RIGHT_DOCK_MIN, RIGHT_DOCK_MAX);
+                // Drag the edge back from the right of the window → auto-uncollapse.
+                m_rightDockCollapsed = false;
             }
         }
-        float rightDockW = fs ? 0.0f : m_rightDockWidth;
+        if (m_hierSplitResizing) {
+            bool down = glfwGetMouseButton(m_window->getHandle(), GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            if (!down) m_hierSplitResizing = false;
+            else {
+                double mx = 0.0, my = 0.0;
+                glfwGetCursorPos(m_window->getHandle(), &mx, &my);
+                m_hierarchyHeight = static_cast<float>(my) - TitleBar::BAR_HEIGHT;
+            }
+        }
+        float rightDockW = fs                       ? 0.0f
+                          : m_rightDockCollapsed     ? RIGHT_DOCK_COLLAPSED_W
+                                                     : m_rightDockWidth;
         float midRight   = winW - rightDockW;   // editor + console stop before the right dock
 
         // Console (bottom dock) — tiles between the left sidebar and the right dock.
@@ -451,13 +555,22 @@ void Engine::run() {
         // Right dock — Scene Hierarchy (top) over Inspector (bottom).
         {
             m_hierarchy.setVisible(!fs);
-            m_inspector.setVisible(!fs);
+            m_inspector.setVisible(!fs && !m_rightDockCollapsed);
+            m_hierarchy.setCollapsedRail(m_rightDockCollapsed);
             float dockX   = winW - rightDockW;
             float dockTop = TitleBar::BAR_HEIGHT;
             float availH  = winH - dockTop;
-            float hierH   = std::clamp(availH * 0.42f, 120.0f, 320.0f);
-            if (hierH > availH) hierH = availH;
+            // When collapsed, the hierarchy panel owns the whole vertical strip
+            // and draws a rail. When expanded, the horizontal separator splits
+            // it between Hierarchy and Inspector.
+            float hierH   = availH;
             float inspTop = dockTop + hierH;
+            if (!m_rightDockCollapsed) {
+                float maxHier = std::max(HIER_SPLIT_MIN, availH - HIER_SPLIT_MIN);
+                hierH = std::clamp(m_hierarchyHeight, HIER_SPLIT_MIN, maxHier);
+                m_hierarchyHeight = hierH;
+                inspTop = dockTop + hierH;
+            }
 
             // Highlight the right-dock resize edge on both sub-panels while
             // the cursor is over it (or while the user is actively dragging).
@@ -491,12 +604,14 @@ void Engine::run() {
                 if      (m_contentBrowser.overResizeEdge()) shape = GLFW_RESIZE_EW_CURSOR;
                 else if (m_console.overResizeEdge())        shape = GLFW_RESIZE_NS_CURSOR;
                 else if (overRightDockEdge())               shape = GLFW_RESIZE_EW_CURSOR;
+                else if (overHierSplitEdge())               shape = GLFW_RESIZE_NS_CURSOR;
             }
             if (shape == 0) {
                 if (m_titleBar.wantsPointerCursor()
                     || m_contentBrowser.wantsPointerCursor()
                     || m_inspector.wantsPointerCursor()
-                    || m_console.wantsPointerCursor())
+                    || m_console.wantsPointerCursor()
+                    || m_hierarchy.wantsPointerCursor())
                     shape = GLFW_HAND_CURSOR;
             }
             m_titleBar.applyCursor(shape);
@@ -507,6 +622,8 @@ void Engine::run() {
 
         bool ok = m_renderer.drawFrame(m_vulkanContext, m_swapchain, m_pipeline,
                                         m_registry, m_descriptors, &m_shadowMap,
+                                        m_pointShadows.data(),
+                                        m_pointShadowJobs.data(), m_pointShadowJobs.size(),
                                         &m_uiPipeline, &m_titleBar, &m_contentBrowser, &m_console, &m_editor,
                                         &m_imagePipeline, &m_matPreviewPipeline,
                                         &m_hierarchy, &m_inspector, &m_gizmo);
@@ -542,6 +659,8 @@ void Engine::fixedUpdate(float dt) {
     }
 
     updateAnimation(dt);                 // glTF transform animation → TransformComponents
+    updateLightGizmoScales();            // point-light gizmos: scale ∝ camera distance
+    syncLightGizmoColors();              // tint sphere material from LightComponent.color
     TransformSystem::update(m_registry); // recompute world matrices from the updated TRS
     updateSkins();                       // jointMatrix = jointWorld * inverseBind → joint UBOs
 }
@@ -552,8 +671,25 @@ bool Engine::overRightDockEdge() const {
     double mx = 0.0, my = 0.0;
     glfwGetCursorPos(m_window->getHandle(), &mx, &my);
     float winW = static_cast<float>(m_window->getWidth());
-    float dockX = winW - m_rightDockWidth;
+    float dockX = winW - (m_rightDockCollapsed ? 0.0f : m_rightDockWidth);
     return std::fabs(mx - dockX) <= RIGHT_DOCK_GRAB && my >= TitleBar::BAR_HEIGHT;
+}
+
+bool Engine::overHierSplitEdge() const {
+    if (m_hierSplitResizing) return true;
+    if (m_window->isFullscreen() || m_rightDockCollapsed) return false;
+    double mx = 0.0, my = 0.0;
+    glfwGetCursorPos(m_window->getHandle(), &mx, &my);
+    float winW = static_cast<float>(m_window->getWidth());
+    float dockX = winW - m_rightDockWidth;
+    if (mx < dockX) return false;
+    // The separator sits at dockTop + m_hierarchyHeight, clamped at layout time.
+    // Re-clamp here so the hit zone matches what was drawn.
+    float dockTop  = TitleBar::BAR_HEIGHT;
+    float availH   = std::max(0.0f, static_cast<float>(m_window->getHeight()) - dockTop);
+    float maxHier  = std::max(HIER_SPLIT_MIN, availH - HIER_SPLIT_MIN);
+    float splitY   = dockTop + std::clamp(m_hierarchyHeight, HIER_SPLIT_MIN, maxHier);
+    return std::fabs(my - splitY) <= HIER_SPLIT_GRAB;
 }
 
 glm::vec3 Engine::selectionPivot() {
@@ -603,6 +739,152 @@ glm::vec3 Engine::selectionPivot() {
     return m_camera.getPosition() + m_camera.getFront() * 6.0f;
 }
 
+void Engine::ensurePointLightGizmo(Entity e) {
+    if (!m_registry.has<LightComponent>(e)) return;
+    const auto& lc = m_registry.get<LightComponent>(e);
+    if (lc.type != LightComponent::Type::Point) return;
+    if (m_registry.has<MeshComponent>(e)) return;   // user-attached mesh wins
+
+    // Sphere mesh + tinted material. The transform stays whatever the entity
+    // already had (default scale 1 → radius 0.2 from makeSphere).
+    Mesh* mesh = resolveMesh("prim:sphere");
+    if (!mesh) return;
+    MeshComponent mc{};
+    mc.mesh   = mesh;
+    mc.source = "prim:sphere";
+    m_registry.assign<MeshComponent>(e, mc);
+
+    if (!m_registry.has<MaterialComponent>(e)) {
+        MaterialParams params{};
+        params.baseColorFactor = glm::vec4(lc.color, 1.0f);
+        params.metallic        = 0.0f;
+        params.roughness       = 1.0f;
+        Descriptors::MaterialMaps maps{};
+        Texture* def = m_resourceCache.getDefaultTexture();
+        maps.baseColor = def; maps.normal = def; maps.metalRough = def; maps.occlusion = def;
+        MaterialComponent mat{};
+        mat.texture         = nullptr;
+        mat.baseColorFactor = glm::vec4(lc.color, 1.0f);
+        mat.metallic        = 0.0f;
+        mat.roughness       = 1.0f;
+        // Host-visible UBO so syncLightGizmoColors can mutate the tint each
+        // frame from LightComponent.color without re-allocating the set.
+        mat.descriptorSet   = m_descriptors.allocateMaterialSet(
+            m_vulkanContext, maps, params, /*hostVisible=*/true, &mat.materialUBO);
+        m_registry.assign<MaterialComponent>(e, mat);
+    }
+    if (!m_registry.has<TransformComponent>(e)) {
+        m_registry.assign<TransformComponent>(e, TransformComponent{});
+    }
+}
+
+void Engine::attachLightGizmos() {
+    auto& pool = m_registry.pool<LightComponent>();
+    for (size_t i = 0; i < pool.size(); ++i) ensurePointLightGizmo(pool.getEntity(i));
+}
+
+void Engine::rebuildPointShadowSlot(int slot, uint32_t resolution) {
+    if (slot < 0 || slot >= MAX_POINT_SHADOWS) return;
+    if (m_pointShadows[slot].getResolution() == resolution) return;
+    // The cube map is referenced by in-flight command buffers (sampling +
+    // potentially shadow render), so wait before destroying it.
+    m_renderer.waitIdle(m_vulkanContext.getDevice());
+    m_pointShadows[slot].cleanup(m_vulkanContext.getDevice(), m_vulkanContext.getAllocator());
+    m_pointShadows[slot].init(m_vulkanContext, m_descriptors.getGlobalLayout(), resolution);
+    // Transition every face to SHADER_READ_ONLY so the new descriptor's
+    // expected layout is valid even before the next render writes to it.
+    VkCommandBuffer cmd = m_vulkanContext.beginSingleTimeCommands();
+    m_pointShadows[slot].prime(cmd);
+    m_vulkanContext.endSingleTimeCommands(cmd);
+    // Re-write the cube map array binding with the updated view list.
+    VkImageView views[MAX_POINT_SHADOWS]{};
+    for (int s = 0; s < MAX_POINT_SHADOWS; ++s) views[s] = m_pointShadows[s].getCubeView();
+    m_descriptors.setPointShadowMaps(m_vulkanContext.getDevice(),
+                                     views, m_pointShadows[0].getSampler());
+    LOG_INFO("Point shadow slot {} rebuilt at {}x{}", slot, resolution, resolution);
+}
+
+void Engine::syncLightGizmoColors() {
+    auto& lp = m_registry.pool<LightComponent>();
+    for (size_t i = 0; i < lp.size(); ++i) {
+        const auto& lc = lp[i];
+        if (lc.type != LightComponent::Type::Point) continue;
+        Entity e = lp.getEntity(i);
+        if (!m_registry.has<MaterialComponent>(e)) continue;
+        auto& mat = m_registry.get<MaterialComponent>(e);
+        if (!mat.materialUBO) continue;
+        // Mirror the light's colour onto the component (for swatches / future
+        // serialisation) and push the full MaterialParams to the host-visible
+        // UBO so the shader sees the new tint this frame.
+        mat.baseColorFactor = glm::vec4(lc.color, mat.baseColorFactor.a);
+        MaterialParams params{};
+        params.baseColorFactor = mat.baseColorFactor;
+        params.metallic        = mat.metallic;
+        params.roughness       = mat.roughness;
+        mat.materialUBO->uploadData(m_vulkanContext.getAllocator(),
+                                    &params, sizeof(MaterialParams));
+    }
+}
+
+void Engine::updateLightGizmoScales() {
+    // Keep the point-light gizmo at a constant on-screen pixel size by writing
+    // an entity-local scale that cancels perspective foreshortening.
+    //   pixelHalf = (meshRadius * scale) * focalLen / dist
+    // Solve for scale at a target pixel size:
+    //   scale = (pixelHalf * dist * 2 * tan(fov/2)) / (meshRadius * screenH)
+    constexpr float MESH_RADIUS   = 0.2f;   // matches makeSphere
+    constexpr float TARGET_PIXELS = 24.0f;  // diameter at any distance
+
+    const int winH = m_window ? m_window->getHeight() : 0;
+    if (winH <= 0) return;
+    const float screenH = static_cast<float>(winH);
+    const float halfFov = glm::radians(m_camera.getFov() * 0.5f);
+    const glm::vec3 camPos = m_camera.getPosition();
+    const float tanHalfFov = std::tan(halfFov);
+
+    auto& lp = m_registry.pool<LightComponent>();
+    for (size_t i = 0; i < lp.size(); ++i) {
+        if (lp[i].type != LightComponent::Type::Point) continue;
+        Entity e = lp.getEntity(i);
+        if (!m_registry.has<TransformComponent>(e))   continue;
+        auto& tc = m_registry.get<TransformComponent>(e);
+        float dist = glm::length(glm::vec3(tc.worldMatrix[3]) - camPos);
+        if (dist < 0.01f) dist = 0.01f;
+        float s = (TARGET_PIXELS * 0.5f * dist * 2.0f * tanHalfFov) / (MESH_RADIUS * screenH);
+        tc.scale = glm::vec3(s);
+    }
+}
+
+void Engine::frameEntity(Entity e) {
+    if (e == NULL_ENTITY || !m_registry.has<TransformComponent>(e)) return;
+    const auto& tc = m_registry.get<TransformComponent>(e);
+
+    glm::vec3 mn, mx;
+    bool any = false;
+    if (m_registry.has<MeshComponent>(e) && m_registry.get<MeshComponent>(e).mesh) {
+        const Mesh* mesh = m_registry.get<MeshComponent>(e).mesh;
+        const glm::vec3& lmn = mesh->boundsMin();
+        const glm::vec3& lmx = mesh->boundsMax();
+        for (int i = 0; i < 8; ++i) {
+            glm::vec3 c{(i & 1) ? lmx.x : lmn.x,
+                        (i & 2) ? lmx.y : lmn.y,
+                        (i & 4) ? lmx.z : lmn.z};
+            glm::vec3 w = glm::vec3(tc.worldMatrix * glm::vec4(c, 1.0f));
+            if (!any) { mn = mx = w; any = true; }
+            else      { mn = glm::min(mn, w); mx = glm::max(mx, w); }
+        }
+    } else {
+        // No mesh (Light, Environment, ...) — frame on the entity's origin.
+        mn = mx = glm::vec3(tc.worldMatrix[3]);
+        any = true;
+    }
+    if (!any) return;
+
+    const glm::vec3 center = (mn + mx) * 0.5f;
+    const float     radius = glm::length(mx - mn) * 0.5f;
+    m_camera.frame(center, radius);
+}
+
 // Upload per-skin joint matrices for the skinned pipeline. Runs after the
 // TransformSystem so joint entities' worldMatrix is current. Per glTF, the
 // skinned mesh node's own transform is ignored; joint world matrices carry the
@@ -624,6 +906,33 @@ void Engine::updateSkins() {
         sk.jointBuffer->uploadData(m_vulkanContext.getAllocator(), matrices.data(),
                                    sizeof(glm::mat4) * count);
     }
+}
+
+void Engine::renderOneFrame() {
+    // Re-query the window's current framebuffer size — during a modal Win32
+    // resize loop, getWidth/getHeight is updated by the GLFW callback chained
+    // off WM_SIZE in our WndProc, which fires synchronously before this
+    // function. Skip on minimised (0 × 0) windows.
+    int w = m_window->getWidth();
+    int h = m_window->getHeight();
+    if (w <= 0 || h <= 0) return;
+
+    VkExtent2D current = m_swapchain.getExtent();
+    if (static_cast<uint32_t>(w) != current.width
+        || static_cast<uint32_t>(h) != current.height) {
+        handleResize();
+    }
+
+    updateUniformBuffer(m_renderer.getCurrentFrame());
+
+    bool ok = m_renderer.drawFrame(m_vulkanContext, m_swapchain, m_pipeline,
+                                    m_registry, m_descriptors, &m_shadowMap,
+                                    m_pointShadows.data(),
+                                    m_pointShadowJobs.data(), m_pointShadowJobs.size(),
+                                    &m_uiPipeline, &m_titleBar, &m_contentBrowser, &m_console, &m_editor,
+                                    &m_imagePipeline, &m_matPreviewPipeline,
+                                    &m_hierarchy, &m_inspector, &m_gizmo);
+    if (!ok) handleResize();
 }
 
 void Engine::handleResize() {
@@ -654,29 +963,47 @@ void Engine::updateUniformBuffer(uint32_t currentFrame) {
     ubo.view       = m_camera.getViewMatrix();
     ubo.projection = m_camera.getProjectionMatrix();
 
-    ubo.ambientColor   = glm::vec4(0.15f, 0.15f, 0.15f, 1.0f);
     ubo.cameraPosition = glm::vec4(m_camera.getPosition(), 1.0f);
 
-    // Analytic sky gradient — same colors drive the skybox and the in-shader IBL so
-    // metallics reflect what's actually drawn behind them. Sunset palette: deep blue
-    // zenith, hot orange horizon, dark ground — gives bloom on metal highlights real
-    // contrast to bleed against. Intensity in .w scales overall (0.8 on horizon keeps
-    // it from saturating).
-    ubo.skyTop     = glm::vec4(0.10f, 0.18f, 0.45f, 1.0f);
-    ubo.skyHorizon = glm::vec4(1.00f, 0.55f, 0.20f, 0.8f);
-    ubo.skyGround  = glm::vec4(0.05f, 0.04f, 0.03f, 1.0f);
+    // Pull sky + ambient from the singleton EnvironmentComponent. Auto-creates
+    // the entity on first call so existing scenes (no env entity saved yet)
+    // still get sensible defaults from the component's in-class initialisers.
+    const EnvironmentComponent& env =
+        m_registry.get<EnvironmentComponent>(ensureEnvironmentEntity());
+    ubo.ambientColor = glm::vec4(env.ambient, 1.0f);
+    ubo.skyTop       = glm::vec4(env.skyTop,     1.0f);
+    ubo.skyHorizon   = glm::vec4(env.skyHorizon, env.skyIntensity);
+    ubo.skyGround    = glm::vec4(env.skyGround,  1.0f);
 
     // Sun-shadow light-space matrix: orthographic projection looking along the
     // directional sun's direction. Volume is sized to cover the typical scene (about
     // the gladiator + small surroundings). With GLM_FORCE_DEPTH_ZERO_TO_ONE the proj
     // returns Vulkan-compatible z [0,1]; we Y-flip so shadow UVs match the renderer's
     // convention.
-    glm::vec3 sunDir(0.0f, -1.0f, 0.0f);
+    // Resolve the sun direction. m_sunEntity gets set in buildDemoScene but a
+    // .scene file load doesn't tag a specific entity as the sun — fall back to
+    // the first directional light in the registry so loaded scenes still cast.
+    glm::vec3 sunDir(-0.5f, -1.0f, -0.3f);
     if (m_sunEntity != NULL_ENTITY && m_registry.has<LightComponent>(m_sunEntity)) {
-        sunDir = glm::normalize(m_registry.get<LightComponent>(m_sunEntity).direction);
+        sunDir = m_registry.get<LightComponent>(m_sunEntity).direction;
+    } else {
+        auto& lightPool = m_registry.pool<LightComponent>();
+        for (size_t i = 0; i < lightPool.size(); ++i) {
+            if (lightPool[i].type == LightComponent::Type::Directional) {
+                sunDir = lightPool[i].direction;
+                break;
+            }
+        }
     }
+    if (glm::length(sunDir) < 1e-4f) sunDir = glm::vec3(-0.5f, -1.0f, -0.3f);
+    sunDir = glm::normalize(sunDir);
+    // Guard the lookAt: a sun pointing straight down (or up) is parallel to the
+    // world-up axis, which makes glm::lookAt produce NaNs (gimbal lock). Pick a
+    // perpendicular up axis when that's the case.
     glm::vec3 lightPos = -sunDir * 20.0f;                       // 20 units back along the light
-    glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::vec3 upAxis   = (std::fabs(sunDir.y) > 0.999f) ? glm::vec3(0.0f, 0.0f, 1.0f)
+                                                        : glm::vec3(0.0f, 1.0f, 0.0f);
+    glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f), upAxis);
     glm::mat4 lightProj = glm::ortho(-8.0f, 8.0f, -8.0f, 8.0f, 0.1f, 50.0f);
     lightProj[1][1] *= -1.0f;                                   // Vulkan Y-flip
     ubo.lightSpace = lightProj * lightView;
@@ -690,7 +1017,8 @@ void Engine::updateUniformBuffer(uint32_t currentFrame) {
 
         GpuLightData& gpu = ubo.lights[lightIndex];
         gpu.colorAndIntensity = glm::vec4(lc.color, lc.intensity);
-        gpu.params = glm::vec4(lc.radius, 0.0f, 0.0f, 0.0f);
+        // params: x = radius, y = shadowIndex (-1 = none, else 0..MAX_POINT_SHADOWS-1).
+        gpu.params = glm::vec4(lc.radius, -1.0f, 0.0f, 0.0f);
 
         if (lc.type == LightComponent::Type::Directional) {
             gpu.positionAndType = glm::vec4(glm::normalize(lc.direction), 0.0f);
@@ -706,6 +1034,51 @@ void Engine::updateUniformBuffer(uint32_t currentFrame) {
         lightIndex++;
     }
     ubo.lightCountAndPad = glm::ivec4(lightIndex, 0, 0, 0);
+
+    // ── Point-light shadow jobs ──────────────────────────────────────────────
+    // Assign each enabled point light to a cube map slot (first-come, first-served
+    // up to MAX_POINT_SHADOWS), compute its 6 per-face view*projection matrices,
+    // and stamp the slot index back into the UBO's lights array.
+    m_pointShadowJobs.clear();
+    int slot = 0;
+    int uboIdx = 0;
+    for (size_t i = 0; i < lightPool.size() && uboIdx < MAX_LIGHTS; ++i) {
+        const auto& lc = lightPool[i];
+        if (lc.type == LightComponent::Type::Point && lc.castsShadows && slot < MAX_POINT_SHADOWS) {
+            Entity le = lightPool.getEntity(i);
+            if (m_registry.has<TransformComponent>(le)) {
+                // Resize the slot's cube if the light requests a different tier.
+                uint32_t req = static_cast<uint32_t>(std::min(2048,
+                    std::max(128, lc.shadowResolution)));
+                if (m_pointShadows[slot].getResolution() != req)
+                    rebuildPointShadowSlot(slot, req);
+
+                glm::vec3 lp = m_registry.get<TransformComponent>(le).position;
+                float farR = std::max(lc.radius, 0.5f);
+                PointShadowJob job{};
+                job.slot      = slot;
+                job.lightPos  = lp;
+                job.farRadius = farR;
+
+                static const glm::vec3 dirs[6] = {
+                    { 1, 0, 0}, {-1, 0, 0}, { 0, 1, 0},
+                    { 0,-1, 0}, { 0, 0, 1}, { 0, 0,-1},
+                };
+                static const glm::vec3 ups[6] = {
+                    { 0,-1, 0}, { 0,-1, 0}, { 0, 0, 1},
+                    { 0, 0,-1}, { 0,-1, 0}, { 0,-1, 0},
+                };
+                glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.05f, farR);
+                for (int f = 0; f < 6; ++f)
+                    job.viewProj[f] = proj * glm::lookAt(lp, lp + dirs[f], ups[f]);
+                m_pointShadowJobs.push_back(job);
+
+                ubo.lights[uboIdx].params.y = static_cast<float>(slot);
+                ++slot;
+            }
+        }
+        ++uboIdx;
+    }
 
     m_descriptors.getUniformBuffer(currentFrame).uploadData(
         m_vulkanContext.getAllocator(), &ubo, sizeof(ubo));
@@ -771,6 +1144,10 @@ Mesh* Engine::resolveMesh(const std::string& source) {
     if (source.rfind("prim:plane", 0) == 0) {
         std::vector<Vertex> v; std::vector<uint32_t> i; makePlane(v, i);
         return m_resourceCache.getOrCreateMesh(m_vulkanContext, "prim:plane", v, i);
+    }
+    if (source.rfind("prim:sphere", 0) == 0) {
+        std::vector<Vertex> v; std::vector<uint32_t> i; makeSphere(v, i);
+        return m_resourceCache.getOrCreateMesh(m_vulkanContext, "prim:sphere", v, i);
     }
     if (source.rfind("obj:", 0) == 0) {
         std::string path = source.substr(4);
@@ -896,10 +1273,19 @@ Entity Engine::pickEntity(double mx, double my, float winW, float winH) {
         glm::mat4 invW = glm::inverse(tc.worldMatrix);
         glm::vec3 lo = glm::vec3(invW * glm::vec4(ro, 1.0f));
         glm::vec3 ld = glm::vec3(invW * glm::vec4(rd, 0.0f));   // un-normalized → t stays world-comparable
-        float t;
-        if (rayAABB(lo, ld, mc.mesh->boundsMin(), mc.mesh->boundsMax(), t) && t < bestT) {
-            bestT = t; best = e;
-        }
+
+        // Cheap bbox reject: if the bbox is entirely missed or only entered
+        // beyond the current best triangle hit, skip the triangle scan.
+        float tBox;
+        if (!rayAABB(lo, ld, mc.mesh->boundsMin(), mc.mesh->boundsMax(), tBox)) continue;
+        if (tBox >= bestT) continue;
+
+        // Precise per-triangle test — the nearest face wins regardless of
+        // bbox size, so a small armor mesh in front of a large body mesh
+        // gets picked when the cursor is over the armor's actual geometry.
+        float tTri;
+        if (!mc.mesh->rayHit(lo, ld, tTri)) continue;
+        if (tTri < bestT) { bestT = tTri; best = e; }
     }
     return best;
 }
@@ -972,7 +1358,11 @@ void Engine::updateGizmo(float winW, float winH, bool cursorActive) {
     if (show) {
         glm::vec3 worldPos = selectionPivot();   // mesh-aware centroid (bbox centres)
         float dist = glm::length(m_camera.getPosition() - worldPos);
-        m_gizmoWorldLen = std::max(0.25f, dist * 0.18f);
+        // World-length proportional to distance keeps the projected gizmo at a
+        // constant screen size. A previous `max(0.25, ...)` floor made the gizmo
+        // grow visibly larger once the user zoomed within ~1.4 world units —
+        // remove it so the screen size stays put at any zoom.
+        m_gizmoWorldLen = dist * 0.18f;
         bool ok = worldToScreen(worldPos, vp, winW, winH, origin);
         for (int a = 0; a < 3 && ok; ++a)
             ok = worldToScreen(worldPos + axes[a] * m_gizmoWorldLen, vp, winW, winH, tips[a]);
@@ -1031,10 +1421,34 @@ void Engine::updateGizmo(float winW, float winH, bool cursorActive) {
                 for (size_t i = 0; i < mp.size(); ++i) {
                     Entity e = mp.getEntity(i);
                     if (!m_registry.has<TransformComponent>(e)) continue;
-                    glm::vec3 wpos = glm::vec3(m_registry.get<TransformComponent>(e).worldMatrix[3]);
-                    glm::vec2 s;
-                    if (worldToScreen(wpos, vp, winW, winH, s) && s.x >= x0 && s.x <= x1 && s.y >= y0 && s.y <= y1
-                        && std::find(hits.begin(), hits.end(), e) == hits.end())
+                    const MeshComponent& mc = m_registry.get<MeshComponent>(e);
+                    if (!mc.mesh) continue;
+                    // Project the 8 world-space bbox corners and test the
+                    // resulting screen-bbox against the marquee. Testing only
+                    // worldMatrix[3] hit every entity whose pivot lives at the
+                    // world origin (i.e. most of them).
+                    const glm::vec3 mn = mc.mesh->boundsMin();
+                    const glm::vec3 mxb = mc.mesh->boundsMax();
+                    const glm::mat4& wm = m_registry.get<TransformComponent>(e).worldMatrix;
+                    float sx0 =  std::numeric_limits<float>::infinity();
+                    float sy0 =  std::numeric_limits<float>::infinity();
+                    float sx1 = -std::numeric_limits<float>::infinity();
+                    float sy1 = -std::numeric_limits<float>::infinity();
+                    bool anyOnScreen = false;
+                    for (int c = 0; c < 8; ++c) {
+                        glm::vec3 corner((c & 1) ? mxb.x : mn.x,
+                                         (c & 2) ? mxb.y : mn.y,
+                                         (c & 4) ? mxb.z : mn.z);
+                        glm::vec2 s;
+                        if (!worldToScreen(glm::vec3(wm * glm::vec4(corner, 1.0f)),
+                                           vp, winW, winH, s)) continue;
+                        sx0 = std::min(sx0, s.x); sy0 = std::min(sy0, s.y);
+                        sx1 = std::max(sx1, s.x); sy1 = std::max(sy1, s.y);
+                        anyOnScreen = true;
+                    }
+                    if (!anyOnScreen) continue;
+                    if (sx1 < x0 || sx0 > x1 || sy1 < y0 || sy0 > y1) continue;
+                    if (std::find(hits.begin(), hits.end(), e) == hits.end())
                         hits.push_back(e);
                 }
                 m_hierarchy.setSelection(hits);
@@ -1138,6 +1552,9 @@ void Engine::buildDemoScene() {
     // the gladiator's torso and looked like a chrome bubble in the chest. The dedicated
     // glTF mount in Engine::init handles the hero asset; ad-hoc test models can be
     // dragged in via the content browser.)
+
+    // Add the sphere gizmo to every point light so they're visible in the viewport.
+    attachLightGizmos();
 
     LOG_INFO("Demo scene built with {} entities", m_registry.pool<MeshComponent>().size());
 }
@@ -1429,6 +1846,10 @@ void Engine::duplicateSelection() {
     std::vector<Entity> created = readEntities(is, glm::vec3(0.5f, 0.0f, 0.5f));  // separate from the clipboard
     if (!created.empty()) {
         pushSpawnAction(created);          // delta — one undo removes all duplicates
+        // Drop the duplicates into the hierarchy order right after their
+        // sources so the new rows appear next to what was copied, not at the
+        // bottom of the list.
+        m_hierarchy.insertAfterSources(ents, created);
         m_hierarchy.setSelection(created);
         LOG_INFO("Duplicated {} entity(ies)", created.size());
     }
@@ -1448,6 +1869,7 @@ void Engine::clearScene() {
     gather(m_registry.pool<MeshComponent>());
     gather(m_registry.pool<MaterialComponent>());
     gather(m_registry.pool<LightComponent>());
+    gather(m_registry.pool<EnvironmentComponent>());
     for (Entity e : ents) m_registry.destroyEntity(e);
 
     // All entities destroyed → reset the id counter so a reload reuses the same low
@@ -1465,6 +1887,25 @@ void Engine::clearScene() {
     m_sunEntity         = NULL_ENTITY;
     m_pointLightEntity  = NULL_ENTITY;
     m_pointLightEntity2 = NULL_ENTITY;
+    m_environmentEntity = NULL_ENTITY;
+}
+
+Entity Engine::ensureEnvironmentEntity() {
+    // Already have it (and the registry still knows about it) — short-circuit.
+    if (m_environmentEntity != NULL_ENTITY
+        && m_registry.has<EnvironmentComponent>(m_environmentEntity)) {
+        return m_environmentEntity;
+    }
+    // Find an existing one in the registry (scene load path).
+    auto& pool = m_registry.pool<EnvironmentComponent>();
+    if (pool.size() > 0) {
+        m_environmentEntity = pool.getEntity(0);
+        return m_environmentEntity;
+    }
+    // None present → create with defaults. Singleton: never more than one.
+    m_environmentEntity = m_registry.createEntity();
+    m_registry.assign<EnvironmentComponent>(m_environmentEntity, EnvironmentComponent{});
+    return m_environmentEntity;
 }
 
 // Write entity blocks (no header) for the given entities — shared by saveScene
@@ -1472,17 +1913,24 @@ void Engine::clearScene() {
 void Engine::writeEntities(std::ostream& os, const std::vector<Entity>& ents) {
     for (Entity e : ents) {
         os << "entity " << e << "\n";
+        // Skip Mesh + Material for light entities — they're auto-generated as
+        // a viewport gizmo by ensurePointLightGizmo and would otherwise bloat
+        // the scene file with the sphere primitive every save/load cycle.
+        const bool isLight = m_registry.has<LightComponent>(e);
         if (m_registry.has<TransformComponent>(e)) {
             const auto& t = m_registry.get<TransformComponent>(e);
             long parent = (t.parent == NULL_ENTITY) ? -1 : (long)t.parent;
+            // Point lights rewrite scale every frame for the camera-relative
+            // gizmo; persist 1 so reloads start from a clean baseline.
+            const glm::vec3 wScale = isLight ? glm::vec3(1.0f) : t.scale;
             os << "transform "
                << t.position.x << ' ' << t.position.y << ' ' << t.position.z << ' '
                << t.rotation.x << ' ' << t.rotation.y << ' ' << t.rotation.z << ' ' << t.rotation.w << ' '
-               << t.scale.x << ' ' << t.scale.y << ' ' << t.scale.z << ' ' << parent << "\n";
+               << wScale.x << ' ' << wScale.y << ' ' << wScale.z << ' ' << parent << "\n";
         }
-        if (m_registry.has<MeshComponent>(e))
+        if (!isLight && m_registry.has<MeshComponent>(e))
             os << "mesh " << m_registry.get<MeshComponent>(e).source << "\n";
-        if (m_registry.has<MaterialComponent>(e)) {
+        if (!isLight && m_registry.has<MaterialComponent>(e)) {
             const auto& m = m_registry.get<MaterialComponent>(e);
             os << "material "
                << m.baseColorFactor.r << ' ' << m.baseColorFactor.g << ' '
@@ -1500,7 +1948,19 @@ void Engine::writeEntities(std::ostream& os, const std::vector<Entity>& ents) {
             const auto& l = m_registry.get<LightComponent>(e);
             os << "light " << (int)l.type << ' '
                << l.color.r << ' ' << l.color.g << ' ' << l.color.b << ' ' << l.intensity << ' '
-               << l.direction.x << ' ' << l.direction.y << ' ' << l.direction.z << ' ' << l.radius << "\n";
+               << l.direction.x << ' ' << l.direction.y << ' ' << l.direction.z << ' ' << l.radius << ' '
+               << (l.castsShadows ? 1 : 0) << ' ' << l.shadowResolution << "\n";
+        }
+        if (m_registry.has<EnvironmentComponent>(e)) {
+            const auto& v = m_registry.get<EnvironmentComponent>(e);
+            os << "env "
+               << v.skyTop.r     << ' ' << v.skyTop.g     << ' ' << v.skyTop.b     << ' '
+               << v.skyHorizon.r << ' ' << v.skyHorizon.g << ' ' << v.skyHorizon.b << ' '
+               << v.skyGround.r  << ' ' << v.skyGround.g  << ' ' << v.skyGround.b  << ' '
+               << v.skyIntensity << ' '
+               << v.ambient.r    << ' ' << v.ambient.g    << ' ' << v.ambient.b    << ' '
+               << v.bloomThreshold << ' ' << v.bloomKnee << ' ' << v.bloomStrength << ' '
+               << (int)v.tonemapper << ' ' << v.exposure << "\n";
         }
     }
 }
@@ -1640,11 +2100,28 @@ std::vector<Entity> Engine::readEntities(std::istream& is, const glm::vec3& posO
             int type = 0; LightComponent lc{};
             ss >> type >> lc.color.r >> lc.color.g >> lc.color.b >> lc.intensity
                >> lc.direction.x >> lc.direction.y >> lc.direction.z >> lc.radius;
+            int castsShadows = 0;
+            if (ss >> castsShadows) lc.castsShadows = (castsShadows != 0);
+            int shadowRes = 0;
+            if (ss >> shadowRes) lc.shadowResolution = shadowRes;
             lc.type = (type == 1) ? LightComponent::Type::Point : LightComponent::Type::Directional;
             m_registry.assign<LightComponent>(cur, lc);
             if (m_loadProgressActive)
                 reportLoadProgress(lc.type == LightComponent::Type::Directional
                                    ? "Adding directional light" : "Adding point light");
+        } else if (key == "env") {
+            EnvironmentComponent v{};
+            int tm = 0;
+            ss >> v.skyTop.r     >> v.skyTop.g     >> v.skyTop.b
+               >> v.skyHorizon.r >> v.skyHorizon.g >> v.skyHorizon.b
+               >> v.skyGround.r  >> v.skyGround.g  >> v.skyGround.b
+               >> v.skyIntensity
+               >> v.ambient.r    >> v.ambient.g    >> v.ambient.b
+               >> v.bloomThreshold >> v.bloomKnee >> v.bloomStrength
+               >> tm >> v.exposure;
+            v.tonemapper = static_cast<EnvironmentComponent::Tonemapper>(tm);
+            m_registry.assign<EnvironmentComponent>(cur, v);
+            m_environmentEntity = cur;
         } else if (key == "clip") {
             float dur = 0.0f; int loop = 1; ss >> dur >> loop;
             AnimClipRT clip; clip.duration = dur; clip.loop = (loop != 0);
@@ -1670,6 +2147,10 @@ std::vector<Entity> Engine::readEntities(std::istream& is, const glm::vec3& posO
         if (it != idMap.end() && m_registry.has<TransformComponent>(e))
             m_registry.get<TransformComponent>(e).parent = it->second;
     }
+    // Light entities serialize without their gizmo (writeEntities skips Mesh +
+    // Material when LightComponent is present), so re-attach here for every
+    // load / paste / duplicate / undo-spawn path that funnels through us.
+    for (Entity e : created) ensurePointLightGizmo(e);
     return created;
 }
 
@@ -1679,6 +2160,7 @@ std::vector<Entity> Engine::sceneEntities() {
     gather(m_registry.pool<TransformComponent>());
     gather(m_registry.pool<MeshComponent>());
     gather(m_registry.pool<LightComponent>());
+    gather(m_registry.pool<EnvironmentComponent>());
     return {set.begin(), set.end()};
 }
 
@@ -1736,6 +2218,13 @@ void Engine::writeActionFile(const UndoAction& a) const {
         f << (a.kind == UndoAction::Kind::Spawn ? "spawn " : "delete ") << a.entities.size();
         for (Entity e : a.entities) f << ' ' << e;
         f << '\n' << a.serialized;
+    } else if (a.kind == UndoAction::Kind::Color) {
+        f << "color " << a.colorEntity << ' ' << (int)a.colorTarget << ' '
+          << a.oldColor.r << ' ' << a.oldColor.g << ' ' << a.oldColor.b << ' ' << a.oldColor.a << ' '
+          << a.newColor.r << ' ' << a.newColor.g << ' ' << a.newColor.b << ' ' << a.newColor.a << "\n";
+    } else if (a.kind == UndoAction::Kind::Scalar) {
+        f << "scalar " << a.scalarEntity << ' ' << (int)a.scalarTarget << ' '
+          << a.oldScalar << ' ' << a.newScalar << "\n";
     }
 }
 
@@ -1771,6 +2260,25 @@ bool Engine::readActionFile(UndoAction& out, const std::string& path) const {
             o.e = static_cast<Entity>(eid);
             n.e = static_cast<Entity>(eid);
         }
+        return true;
+    }
+    if (header == "color") {
+        // "color" uses `count` as the entity id (no per-entry array — always 1).
+        out.kind        = UndoAction::Kind::Color;
+        out.colorEntity = static_cast<Entity>(count);
+        int targetIdx = 0;
+        f >> targetIdx
+          >> out.oldColor.r >> out.oldColor.g >> out.oldColor.b >> out.oldColor.a
+          >> out.newColor.r >> out.newColor.g >> out.newColor.b >> out.newColor.a;
+        out.colorTarget = static_cast<Inspector::PickerField>(targetIdx);
+        return true;
+    }
+    if (header == "scalar") {
+        out.kind         = UndoAction::Kind::Scalar;
+        out.scalarEntity = static_cast<Entity>(count);
+        int targetIdx = 0;
+        f >> targetIdx >> out.oldScalar >> out.newScalar;
+        out.scalarTarget = static_cast<Inspector::ScalarField>(targetIdx);
         return true;
     }
     if (header == "spawn" || header == "delete") {
@@ -1865,6 +2373,16 @@ void Engine::applyAction(UndoAction& a, bool forward) {
             restoreScene(a.serialized);
             break;
         }
+        case UndoAction::Kind::Color: {
+            const glm::vec4& c = forward ? a.newColor : a.oldColor;
+            writeColorTarget(a.colorEntity, a.colorTarget, c);
+            break;
+        }
+        case UndoAction::Kind::Scalar: {
+            float v = forward ? a.newScalar : a.oldScalar;
+            writeScalarTarget(a.scalarEntity, a.scalarTarget, v);
+            break;
+        }
     }
     m_sceneDirty = true;
 }
@@ -1932,6 +2450,184 @@ void Engine::endTransformUndo() {
     pushAction(std::move(a));
 }
 
+// ── Color delta: per-field old/new RGBA for one component ──
+glm::vec4 Engine::readColorTarget(Entity e, Inspector::PickerField t) const {
+    using PF = Inspector::PickerField;
+    if (e == NULL_ENTITY) return glm::vec4(1.0f);
+    switch (t) {
+        case PF::MaterialBase:
+            if (m_registry.has<MaterialComponent>(e))
+                return m_registry.get<MaterialComponent>(e).baseColorFactor;
+            break;
+        case PF::LightColor:
+            if (m_registry.has<LightComponent>(e))
+                return glm::vec4(m_registry.get<LightComponent>(e).color, 1.0f);
+            break;
+        case PF::EnvSkyTop:
+            if (m_registry.has<EnvironmentComponent>(e))
+                return glm::vec4(m_registry.get<EnvironmentComponent>(e).skyTop, 1.0f);
+            break;
+        case PF::EnvSkyHorizon:
+            if (m_registry.has<EnvironmentComponent>(e))
+                return glm::vec4(m_registry.get<EnvironmentComponent>(e).skyHorizon, 1.0f);
+            break;
+        case PF::EnvSkyGround:
+            if (m_registry.has<EnvironmentComponent>(e))
+                return glm::vec4(m_registry.get<EnvironmentComponent>(e).skyGround, 1.0f);
+            break;
+        case PF::EnvAmbient:
+            if (m_registry.has<EnvironmentComponent>(e))
+                return glm::vec4(m_registry.get<EnvironmentComponent>(e).ambient, 1.0f);
+            break;
+    }
+    return glm::vec4(1.0f);
+}
+
+void Engine::writeColorTarget(Entity e, Inspector::PickerField t, const glm::vec4& c) {
+    using PF = Inspector::PickerField;
+    if (e == NULL_ENTITY) return;
+    switch (t) {
+        case PF::MaterialBase:
+            if (m_registry.has<MaterialComponent>(e))
+                m_registry.get<MaterialComponent>(e).baseColorFactor = c;
+            break;
+        case PF::LightColor:
+            if (m_registry.has<LightComponent>(e))
+                m_registry.get<LightComponent>(e).color = glm::vec3(c);
+            break;
+        case PF::EnvSkyTop:
+            if (m_registry.has<EnvironmentComponent>(e))
+                m_registry.get<EnvironmentComponent>(e).skyTop = glm::vec3(c);
+            break;
+        case PF::EnvSkyHorizon:
+            if (m_registry.has<EnvironmentComponent>(e))
+                m_registry.get<EnvironmentComponent>(e).skyHorizon = glm::vec3(c);
+            break;
+        case PF::EnvSkyGround:
+            if (m_registry.has<EnvironmentComponent>(e))
+                m_registry.get<EnvironmentComponent>(e).skyGround = glm::vec3(c);
+            break;
+        case PF::EnvAmbient:
+            if (m_registry.has<EnvironmentComponent>(e))
+                m_registry.get<EnvironmentComponent>(e).ambient = glm::vec3(c);
+            break;
+    }
+}
+
+void Engine::beginColorUndo(Entity e, Inspector::PickerField t) {
+    m_pendingColorEntity = e;
+    m_pendingColorTarget = t;
+    m_pendingColorOld    = readColorTarget(e, t);
+    m_pendingColorActive = true;
+}
+
+void Engine::endColorUndo(Entity e, Inspector::PickerField t) {
+    if (!m_pendingColorActive) return;
+    m_pendingColorActive = false;
+    if (e != m_pendingColorEntity || t != m_pendingColorTarget) return;
+
+    glm::vec4 now = readColorTarget(e, t);
+    if (now == m_pendingColorOld) return;   // no-op (dragged back to start)
+
+    UndoAction a;
+    a.kind        = UndoAction::Kind::Color;
+    a.colorEntity = e;
+    a.colorTarget = t;
+    a.oldColor    = m_pendingColorOld;
+    a.newColor    = now;
+    pushAction(std::move(a));
+}
+
+// ── Scalar delta: per-field old/new float for one component field ──
+float Engine::readScalarTarget(Entity e, Inspector::ScalarField t) const {
+    using SF = Inspector::ScalarField;
+    if (e == NULL_ENTITY) return 0.0f;
+    switch (t) {
+        case SF::LightIntensity:
+            return m_registry.has<LightComponent>(e) ? m_registry.get<LightComponent>(e).intensity : 0.0f;
+        case SF::LightRadius:
+            return m_registry.has<LightComponent>(e) ? m_registry.get<LightComponent>(e).radius    : 0.0f;
+        case SF::LightCastsShadows:
+            return (m_registry.has<LightComponent>(e) && m_registry.get<LightComponent>(e).castsShadows) ? 1.0f : 0.0f;
+        case SF::LightShadowResolution:
+            return m_registry.has<LightComponent>(e) ? (float)m_registry.get<LightComponent>(e).shadowResolution : 512.0f;
+        default: break;
+    }
+    if (!m_registry.has<EnvironmentComponent>(e)) return 0.0f;
+    const auto& ec = m_registry.get<EnvironmentComponent>(e);
+    switch (t) {
+        case SF::EnvSkyIntensity:   return ec.skyIntensity;
+        case SF::EnvBloomThreshold: return ec.bloomThreshold;
+        case SF::EnvBloomKnee:      return ec.bloomKnee;
+        case SF::EnvBloomStrength:  return ec.bloomStrength;
+        case SF::EnvExposure:       return ec.exposure;
+        case SF::EnvTonemapper:     return static_cast<float>(static_cast<uint32_t>(ec.tonemapper));
+        default: break;
+    }
+    return 0.0f;
+}
+
+void Engine::writeScalarTarget(Entity e, Inspector::ScalarField t, float v) {
+    using SF = Inspector::ScalarField;
+    if (e == NULL_ENTITY) return;
+    switch (t) {
+        case SF::LightIntensity:
+            if (m_registry.has<LightComponent>(e)) m_registry.get<LightComponent>(e).intensity = v;
+            return;
+        case SF::LightRadius:
+            if (m_registry.has<LightComponent>(e)) m_registry.get<LightComponent>(e).radius    = v;
+            return;
+        case SF::LightCastsShadows:
+            if (m_registry.has<LightComponent>(e))
+                m_registry.get<LightComponent>(e).castsShadows = (std::round(v) != 0.0f);
+            return;
+        case SF::LightShadowResolution:
+            if (m_registry.has<LightComponent>(e))
+                m_registry.get<LightComponent>(e).shadowResolution = (int)std::round(v);
+            return;
+        default: break;
+    }
+    if (!m_registry.has<EnvironmentComponent>(e)) return;
+    auto& ec = m_registry.get<EnvironmentComponent>(e);
+    switch (t) {
+        case SF::EnvSkyIntensity:   ec.skyIntensity   = v; break;
+        case SF::EnvBloomThreshold: ec.bloomThreshold = v; break;
+        case SF::EnvBloomKnee:      ec.bloomKnee      = v; break;
+        case SF::EnvBloomStrength:  ec.bloomStrength  = v; break;
+        case SF::EnvExposure:       ec.exposure       = v; break;
+        case SF::EnvTonemapper: {
+            int idx = std::min(2, std::max(0, (int)std::round(v)));
+            ec.tonemapper = static_cast<EnvironmentComponent::Tonemapper>(idx);
+            break;
+        }
+        default: break;
+    }
+}
+
+void Engine::beginScalarUndo(Entity e, Inspector::ScalarField t) {
+    m_pendingScalarEntity = e;
+    m_pendingScalarTarget = t;
+    m_pendingScalarOld    = readScalarTarget(e, t);
+    m_pendingScalarActive = true;
+}
+
+void Engine::endScalarUndo(Entity e, Inspector::ScalarField t) {
+    if (!m_pendingScalarActive) return;
+    m_pendingScalarActive = false;
+    if (e != m_pendingScalarEntity || t != m_pendingScalarTarget) return;
+
+    float now = readScalarTarget(e, t);
+    if (now == m_pendingScalarOld) return;
+
+    UndoAction a;
+    a.kind         = UndoAction::Kind::Scalar;
+    a.scalarEntity = e;
+    a.scalarTarget = t;
+    a.oldScalar    = m_pendingScalarOld;
+    a.newScalar    = now;
+    pushAction(std::move(a));
+}
+
 // ── Spawn / Delete deltas: per-entity instead of full-scene snapshot ──
 void Engine::pushSpawnAction(const std::vector<Entity>& created) {
     if (created.empty()) return;
@@ -1975,6 +2671,37 @@ void Engine::redo() {
     applyAction(a, /*forward=*/true);
     m_undoStack.push_back(std::move(a));
     LOG_INFO("Redo ({} more available)", m_redoStack.size());
+}
+
+void Engine::loadEditorPrefs() {
+    std::ifstream f(m_projectPath + "/editor.prefs");
+    if (!f) return;
+    std::string key;
+    while (f >> key) {
+        if      (key == "rightDockCollapsed") { int v = 0; f >> v; m_rightDockCollapsed = (v != 0); }
+        else if (key == "rightDockWidth")     f >> m_rightDockWidth;
+        else if (key == "hierarchyHeight")    f >> m_hierarchyHeight;
+        else if (key == "browserExpanded")    { int v = 0; f >> v; m_contentBrowser.setExpanded(v != 0); }
+        else if (key == "browserWidth")       { float v = 0; f >> v; m_contentBrowser.setPanelWidth(v); }
+        else if (key == "consoleExpanded")    { int v = 0; f >> v; m_console.setExpanded(v != 0); }
+        else if (key == "consoleHeight")      { float v = 0; f >> v; m_console.setPanelHeight(v); }
+        else { std::string skip; std::getline(f, skip); }
+    }
+}
+
+void Engine::saveEditorPrefs() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::create_directories(m_projectPath, ec);
+    std::ofstream f(m_projectPath + "/editor.prefs");
+    if (!f) return;
+    f << "rightDockCollapsed " << (m_rightDockCollapsed ? 1 : 0) << "\n"
+      << "rightDockWidth "     << m_rightDockWidth                << "\n"
+      << "hierarchyHeight "    << m_hierarchyHeight               << "\n"
+      << "browserExpanded "    << (m_contentBrowser.isExpanded() ? 1 : 0) << "\n"
+      << "browserWidth "       << m_contentBrowser.panelWidth()   << "\n"
+      << "consoleExpanded "    << (m_console.isExpanded() ? 1 : 0) << "\n"
+      << "consoleHeight "      << m_console.panelHeight()         << "\n";
 }
 
 void Engine::saveCurrentScene() {
@@ -2046,6 +2773,10 @@ void Engine::loadScene(const std::string& path) {
     std::vector<Entity> created = readEntities(f, glm::vec3(0.0f));
 
     m_loadProgressActive = false;
+
+    // Scene file no longer stores the auto-generated light gizmo (see writeEntities);
+    // re-attach the sphere mesh + material so loaded point lights show up in view.
+    attachLightGizmos();
 
     m_selectedEntity = NULL_ENTITY;
     m_hierarchy.setSelection({});

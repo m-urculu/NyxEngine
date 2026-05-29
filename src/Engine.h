@@ -21,6 +21,8 @@
 #include "ui/Inspector.h"
 #include "ui/Gizmo.h"
 #include "scene/Camera.h"
+#include "renderer/PointShadowMap.h"
+#include "renderer/UniformTypes.h"
 #include "core/Time.h"
 #include "ecs/Registry.h"
 
@@ -85,6 +87,18 @@ private:
     Inspector                m_inspector;
     Gizmo                    m_gizmo;
     Camera                   m_camera;
+
+    // Point-light shadow maps. Up to MAX_POINT_SHADOWS cube maps live for the
+    // engine's lifetime; each frame, enabled point lights are assigned to
+    // free slots. m_pointShadowJobs queues the render work for the Renderer.
+    std::array<PointShadowMap, MAX_POINT_SHADOWS> m_pointShadows;
+    std::vector<PointShadowJob>                   m_pointShadowJobs;
+
+    // Tear down and re-init one shadow slot at a new per-face resolution.
+    // Used when a light's shadowResolution crosses a tier boundary. The cube
+    // view changes, so the global descriptor binding (set 0, binding 2) is
+    // also rewritten with the updated view list.
+    void rebuildPointShadowSlot(int slot, uint32_t resolution);
     Time                     m_time;
     Registry                 m_registry;
 
@@ -97,10 +111,23 @@ private:
     Entity m_selectedEntity = NULL_ENTITY;
     float  m_rightDockWidth   = 250.0f;
     bool   m_rightDockResizing = false;
-    static constexpr float RIGHT_DOCK_MIN  = 180.0f;
-    static constexpr float RIGHT_DOCK_MAX  = 600.0f;
-    static constexpr float RIGHT_DOCK_GRAB = 5.0f;
+    bool   m_rightDockCollapsed = false;          // Ctrl+B toggles
+    static constexpr float RIGHT_DOCK_MIN            = 180.0f;
+    static constexpr float RIGHT_DOCK_MAX            = 600.0f;
+    static constexpr float RIGHT_DOCK_GRAB           = 5.0f;
+    static constexpr float RIGHT_DOCK_COLLAPSED_W    = 18.0f;   // thin rail width when collapsed
     bool   overRightDockEdge() const;   // true when cursor is on (or over) the grab zone
+
+    // Hierarchy ↔ Inspector vertical split inside the right dock. Stored in
+    // pixels (clamped to the available dock height at layout time); dragging
+    // the horizontal separator updates it. The 4-px grab zone straddles the
+    // separator the same way the right-dock edge does.
+    float  m_hierarchyHeight   = 320.0f;
+    bool   m_hierSplitResizing = false;
+    static constexpr float HIER_SPLIT_MIN  = 80.0f;
+    static constexpr float HIER_SPLIT_GRAB = 4.0f;
+    bool   overHierSplitEdge() const;
+    void   toggleRightDockCollapsed() { m_rightDockCollapsed = !m_rightDockCollapsed; }
 
     // ── Viewport picking + translation gizmo ───────────────────────────────────
     void   updateGizmo(float winW, float winH, bool cursorActive);  // per-frame: geometry + drag
@@ -135,12 +162,45 @@ private:
     Entity m_pointLightEntity = NULL_ENTITY;
     Entity m_pointLightEntity2 = NULL_ENTITY;
 
+    // Singleton "Environment" entity — holds the per-scene aesthetic settings
+    // (sky gradient, bloom, exposure, ambient). Auto-created if a loaded scene
+    // doesn't have one. Persisted through .scene save/load.
+    Entity m_environmentEntity = NULL_ENTITY;
+    Entity ensureEnvironmentEntity();   // create on demand or return existing
+
     void handleResize();
+    // Drive one full frame: refresh window dims, recreate swapchain if size
+    // changed, build the UBO, draw, and recover from VK_ERROR_OUT_OF_DATE.
+    // Called from the WndProc during a modal Win32 resize loop so the window
+    // contents update in real time while the user drags an edge.
+    void renderOneFrame();
     void fixedUpdate(float dt);
 
     // Pivot for camera orbit/zoom: centroid of the current selection's world
     // positions, or a point in front of the camera when nothing is selected.
     glm::vec3 selectionPivot();
+
+    // Compute one entity's world-space AABB and call Camera::frame() with its
+    // centre and bounding-sphere radius. Hierarchy double-click hits this.
+    void      frameEntity(Entity e);
+
+    // Attach a sphere mesh + tinted material to a Point light so it shows up
+    // visually in the viewport. Idempotent — does nothing if the gizmo (or
+    // any other mesh) is already present. The colour is baked into the
+    // material UBO at allocation time; changing LightComponent.color later
+    // won't retint the gizmo until the light is respawned.
+    void      ensurePointLightGizmo(Entity e);
+    // Walk every entity and call ensurePointLightGizmo. Cheap enough to run
+    // after every scene load.
+    void      attachLightGizmos();
+    // Rewrite every point-light entity's TransformComponent.scale each frame
+    // so the gizmo sphere stays a constant ~size in screen pixels regardless
+    // of camera distance / FOV. Runs before TransformSystem::update.
+    void      updateLightGizmoScales();
+    // Re-upload each point-light gizmo's MaterialParams to its host-visible
+    // UBO so the sphere visually tracks LightComponent.color changes made
+    // through the inspector / picker. Cheap (one memcpy per light).
+    void      syncLightGizmoColors();
     void updateUniformBuffer(uint32_t currentFrame);
     void buildDemoScene();
     // Load every primitive of a glTF as entities at `position`; returns the first.
@@ -210,6 +270,11 @@ private:
     void  saveScene(const std::string& path);
     void  loadScene(const std::string& path);
     void  clearScene();
+
+    // Persist / restore editor layout state (collapse flags + panel sizes) so
+    // it survives a restart. Written to <projectPath>/editor.prefs.
+    void  loadEditorPrefs();
+    void  saveEditorPrefs();
     void  writeEntities(std::ostream& os, const std::vector<Entity>& ents);        // serialize entity blocks
     std::vector<Entity> readEntities(std::istream& is, const glm::vec3& posOffset); // instantiate; returns new ids
     std::vector<Entity> sceneEntities();        // all entities (Transform∪Mesh∪Light)
@@ -223,7 +288,7 @@ private:
     // changes). Each action gets a file in <projectPath>/scenes/.history/ so undo
     // survives close/reopen.
     struct UndoAction {
-        enum class Kind { Transform, Spawn, Delete, Snapshot } kind = Kind::Snapshot;
+        enum class Kind { Transform, Spawn, Delete, Snapshot, Color, Scalar } kind = Kind::Snapshot;
         std::string path;                                          // backing file
 
         // Kind::Transform — entity IDs + old/new TRS for each changed entity.
@@ -235,6 +300,18 @@ private:
         // recreate them (covers both single-spawn and multi-spawn like paste/dup).
         std::vector<Entity> entities;                              // current registry ids; updated on each apply
         std::string         serialized;                            // text round-trippable through readEntities
+
+        // Kind::Color — single-field delta of a color-bearing component.
+        Entity                 colorEntity = NULL_ENTITY;
+        Inspector::PickerField colorTarget = Inspector::PickerField::MaterialBase;
+        glm::vec4              oldColor    {1.0f};
+        glm::vec4              newColor    {1.0f};
+
+        // Kind::Scalar — single-field delta of a numeric / enum component field.
+        Entity                 scalarEntity = NULL_ENTITY;
+        Inspector::ScalarField scalarTarget = Inspector::ScalarField::EnvSkyIntensity;
+        float                  oldScalar   = 0.0f;
+        float                  newScalar   = 0.0f;
 
         // Kind::Snapshot — content lives in the file at `path`.
     };
@@ -258,6 +335,31 @@ private:
 
     void beginTransformUndo(const std::vector<Entity>& ents);      // capture pre-mutation TRS
     void endTransformUndo();                                       // capture post-mutation TRS, push action
+
+    // In-progress color edit (Inspector picker). Captured between begin/end:
+    // nullopt when no edit is active.
+    bool                    m_pendingColorActive = false;
+    Entity                  m_pendingColorEntity = NULL_ENTITY;
+    Inspector::PickerField  m_pendingColorTarget = Inspector::PickerField::MaterialBase;
+    glm::vec4               m_pendingColorOld    {1.0f};
+
+    void beginColorUndo(Entity e, Inspector::PickerField t);
+    void endColorUndo  (Entity e, Inspector::PickerField t);
+
+    glm::vec4 readColorTarget (Entity e, Inspector::PickerField t) const;
+    void      writeColorTarget(Entity e, Inspector::PickerField t, const glm::vec4& c);
+
+    // In-progress scalar edit (Inspector scrub / tonemap button).
+    bool                    m_pendingScalarActive = false;
+    Entity                  m_pendingScalarEntity = NULL_ENTITY;
+    Inspector::ScalarField  m_pendingScalarTarget = Inspector::ScalarField::EnvSkyIntensity;
+    float                   m_pendingScalarOld    = 0.0f;
+
+    void beginScalarUndo(Entity e, Inspector::ScalarField t);
+    void endScalarUndo  (Entity e, Inspector::ScalarField t);
+
+    float readScalarTarget (Entity e, Inspector::ScalarField t) const;
+    void  writeScalarTarget(Entity e, Inspector::ScalarField t, float v);
 
     void pushSpawnAction(const std::vector<Entity>& created);      // call after entities are spawned
     void pushDeleteAction(const std::vector<Entity>& toDelete);    // call BEFORE the entities are destroyed

@@ -48,6 +48,12 @@ public:
     bool isVisible() const { return m_visible; }
     float currentHeight() const { return m_expanded ? m_height : HEADER_H; }
 
+    // Persisted layout state — written to editor.prefs on shutdown.
+    bool  isExpanded()  const { return m_expanded; }
+    float panelHeight() const { return m_height; }
+    void  setExpanded(bool v)     { m_expanded = v; }
+    void  setPanelHeight(float h) { m_height   = h; }
+
     // ── Dev command console (the "Console" tab) ──────────────────────────────
     using CmdFn = std::function<void(const std::vector<std::string>& args)>;
     void registerCommand(const std::string& name, const std::string& help, CmdFn fn);

@@ -31,6 +31,10 @@ public:
     void  setFov(float fovDegrees) { m_fov = fovDegrees; }   // proj rebuilt from m_fov each frame
     float getFov() const { return m_fov; }
 
+    // Reposition along the current view direction so a sphere of `radius`
+    // around `center` fits comfortably in the FOV. Yaw / pitch unchanged.
+    void frame(const glm::vec3& center, float radius);
+
 private:
     glm::vec3 m_position = {0.0f, 0.0f, 3.0f};
     float m_yaw   = -90.0f;   // Looking along -Z
@@ -39,8 +43,12 @@ private:
     float m_speed       = 3.0f;
     float m_sensitivity = 0.1f;
     float m_fov         = 45.0f;
-    float m_nearPlane   = 0.1f;
-    float m_farPlane    = 100.0f;
+    // Wider depth range than the typical 0.1..100 so the screen-constant
+    // light/direction gizmos don't clip when the user zooms in tight or pushes
+    // way out. Reverse-Z is in use (GLM_FORCE_DEPTH_ZERO_TO_ONE), so depth
+    // precision near the camera stays fine even with the smaller near plane.
+    float m_nearPlane   = 0.01f;
+    float m_farPlane    = 1000.0f;
     float m_aspectRatio = 16.0f / 9.0f;
 
     glm::vec3 m_front = {0.0f, 0.0f, -1.0f};

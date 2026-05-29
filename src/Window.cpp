@@ -1,5 +1,7 @@
 #include "Window.h"
 #include "Logger.h"
+#include <algorithm>
+#include <cstring>
 #include <stdexcept>
 
 #ifdef _WIN32
@@ -8,7 +10,18 @@
 #  include <windows.h>
 #  include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 #  include <shobjidl.h>   // IFileOpenDialog (native folder picker)
+#  include <dwmapi.h>     // DwmSetWindowAttribute for square corners (Win 11+)
 #  include <filesystem>
+// DWMWA_WINDOW_CORNER_PREFERENCE landed in the Win 10 22000 SDK — older SDKs
+// don't define it. Both the attribute index (33) and the DWMWCP_DONOTROUND
+// value (1) are stable, so falling back to the literals lets the same source
+// build against older SDKs while still working on Win 11 at runtime.
+#  ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#    define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#  endif
+#  ifndef DWMWCP_DONOTROUND
+#    define DWMWCP_DONOTROUND 1
+#  endif
 #endif
 
 namespace Nyx {
@@ -45,8 +58,164 @@ LRESULT nyxHitTest(HWND hwnd, LPARAM lParam) {
     return HTCLIENT;
 }
 
+// Force a rectangular window shape — used as a stronger fallback when
+// DwmSetWindowAttribute(DWMWCP_DONOTROUND) is silently ignored (some Win11
+// builds round corners regardless of the corner preference attribute). The
+// region IS the window shape, so DWM has no rounded region to clip against.
+void applyRectRegion(HWND hwnd) {
+    RECT rc;
+    if (!GetWindowRect(hwnd, &rc)) return;
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) return;
+    HRGN rgn = CreateRectRgn(0, 0, w, h);
+    // SetWindowRgn takes ownership of rgn; don't DeleteObject it.
+    SetWindowRgn(hwnd, rgn, TRUE);
+}
+
+// Set by Window::setLiveResizeCallback. Called from the WndProc on resize so
+// the engine paints mid-drag. Plain function pointer/closure is fine — the
+// WndProc only runs on the main thread (same thread that polls events).
+static std::function<void()> s_liveResizeCb;
+
+// Rubber-band resize state. WM_SIZING locks the window at its pre-drag size
+// and tracks the user's proposed rect via a layered overlay window that
+// floats above all others. WM_EXITSIZEMOVE snaps the window to the overlay's
+// last position.
+static bool s_inResize    = false;
+static RECT s_lockedRect  = {};
+static RECT s_lastBand    = {};
+
+// Layered overlay updated atomically per frame via UpdateLayeredWindow with a
+// 32-bit DIB. Position, size, AND pixel contents change in a single call so
+// DWM can't show a half-resized state — which is what caused the moving-edge
+// blink with the previous SetWindowPos + InvalidateRect / WM_PAINT path.
+static HWND          s_bandHwnd  = nullptr;
+static const wchar_t kBandClass[] = L"NyxResizeBand";
+
+LRESULT CALLBACK bandProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void ensureBandWindow() {
+    if (s_bandHwnd) return;
+    HINSTANCE hi = GetModuleHandleW(nullptr);
+    WNDCLASSW wc{};
+    wc.lpfnWndProc   = bandProc;
+    wc.hInstance     = hi;
+    wc.lpszClassName = kBandClass;
+    wc.hbrBackground = nullptr;
+    RegisterClassW(&wc);
+    s_bandHwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        kBandClass, L"", WS_POPUP,
+        0, 0, 100, 100, nullptr, nullptr, hi, nullptr);
+}
+
+static void showBand(const RECT& r) {
+    ensureBandWindow();
+    int w = r.right - r.left;
+    int h = r.bottom - r.top;
+    if (w <= 0 || h <= 0) return;
+
+    // Build a 32-bit BGRA DIB sized to the overlay. Premultiplied alpha is
+    // the layered-window contract: each colour channel is multiplied by the
+    // alpha already. For an opaque (alpha = 255) mint pixel, that's just the
+    // mint colour itself.
+    HDC screen = GetDC(nullptr);
+    HDC mem    = CreateCompatibleDC(screen);
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = w;
+    bmi.bmiHeader.biHeight      = -h;        // top-down
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ oldBmp = SelectObject(mem, dib);
+
+    // Zero-init = fully transparent everywhere.
+    std::memset(bits, 0, static_cast<size_t>(w) * h * 4);
+
+    // Mint border strips. Matches the splash screen accent (RGB 107,255,170)
+    // at its 2 px thickness so the resize hint visually belongs with the
+    // rest of the editor chrome. BGRA premultiplied byte order.
+    const uint32_t mintBGRA = (0xFFu << 24) | (107u << 16) | (255u << 8) | 170u;
+    const int t = 2;
+    auto* px = static_cast<uint32_t*>(bits);
+    for (int y = 0; y < t && y < h; ++y)
+        for (int x = 0; x < w; ++x) px[y * w + x] = mintBGRA;
+    for (int y = std::max(0, h - t); y < h; ++y)
+        for (int x = 0; x < w; ++x) px[y * w + x] = mintBGRA;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < t && x < w; ++x) px[y * w + x] = mintBGRA;
+        for (int x = std::max(0, w - t); x < w; ++x) px[y * w + x] = mintBGRA;
+    }
+
+    POINT dstPos { r.left, r.top };
+    SIZE  sz     { w, h };
+    POINT srcPos { 0, 0 };
+    BLENDFUNCTION blend{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(s_bandHwnd, screen,
+                        &dstPos, &sz, mem, &srcPos, 0, &blend, ULW_ALPHA);
+
+    if (!IsWindowVisible(s_bandHwnd)) ShowWindow(s_bandHwnd, SW_SHOWNOACTIVATE);
+
+    SelectObject(mem, oldBmp);
+    DeleteObject(dib);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+}
+
+static void hideBand() {
+    if (s_bandHwnd) ShowWindow(s_bandHwnd, SW_HIDE);
+}
+
 LRESULT CALLBACK nyxWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case WM_ENTERSIZEMOVE:
+            // Modal loop begins (resize OR move). Capture the starting rect;
+            // s_inResize flips on the first WM_SIZING and stays off for moves
+            // so dragging the title bar keeps live behaviour.
+            GetWindowRect(hwnd, &s_lockedRect);
+            s_lastBand = s_lockedRect;
+            s_inResize = false;
+            break;
+        case WM_SIZING: {
+            // Lock the window at its pre-drag rect by overwriting Windows'
+            // proposed rect; track the cursor's real proposed rect via the
+            // overlay window so we can snap to it on release.
+            RECT* prc = reinterpret_cast<RECT*>(lp);
+            RECT proposed = *prc;
+            *prc = s_lockedRect;
+            s_inResize = true;
+            showBand(proposed);
+            s_lastBand = proposed;
+            return TRUE;
+        }
+        case WM_SIZE:
+        case WM_WINDOWPOSCHANGED: {
+            // Outside the modal resize loop the window can size normally.
+            LRESULT r = CallWindowProc(g_prevProc, hwnd, msg, wp, lp);
+            applyRectRegion(hwnd);
+            return r;
+        }
+        case WM_EXITSIZEMOVE:
+            // Modal loop ends. Hide the overlay, then snap the window to the
+            // rect the user landed on; the chained WM_SIZE handles
+            // applyRectRegion + GLFW resize callback.
+            hideBand();
+            if (s_inResize) {
+                SetWindowPos(hwnd, nullptr,
+                             s_lastBand.left, s_lastBand.top,
+                             s_lastBand.right  - s_lastBand.left,
+                             s_lastBand.bottom - s_lastBand.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            s_inResize = false;
+            if (s_liveResizeCb) s_liveResizeCb();
+            break;
         case WM_NCCALCSIZE:
             if (wp == TRUE) {
                 // Client fills the whole window (no native frame). When maximized
@@ -81,8 +250,31 @@ void installNativeChrome(GLFWwindow* win) {
     // Subclass the window proc (chain to GLFW's for everything we don't handle).
     g_prevProc = reinterpret_cast<WNDPROC>(GetWindowLongPtr(hwnd, GWLP_WNDPROC));
     SetWindowLongPtr(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(nyxWndProc));
+    // Apply Aero Snap/move behavior etc. first; we'll re-set the corner
+    // attribute AFTER the frame change so DWM picks it up against the new
+    // window style.
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                  SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+    // Disable Windows 11 auto-rounded corners — the OS rounds the top two
+    // corners only (the bottom are squared off when WM_NCCALCSIZE removes the
+    // frame), which looks asymmetric. DWMWCP_DONOTROUND forces hard 90° on all
+    // four. No-op on Windows 10 (the call returns DWM_E_NOT_SUPPORTED). Apply
+    // after SetWindowPos — applying before, then triggering SWP_FRAMECHANGED,
+    // can leave DWM's corner preference unread on some Win11 builds.
+    DWORD pref = DWMWCP_DONOTROUND;
+    HRESULT hr = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
+    if (FAILED(hr)) {
+        // Older DWM (pre-22000) doesn't know the attribute. That's fine — those
+        // builds don't round corners anyway. Anything else is unexpected.
+        LOG_INFO("DwmSetWindowAttribute(corner=DONOTROUND) hr=0x{:x} (skipped on Win10)",
+                 static_cast<unsigned>(hr));
+    }
+    // Force the window shape to be rectangular. Belt-and-suspenders on Win11
+    // builds where DWMWCP_DONOTROUND is silently ignored — DWM can't round a
+    // shape that's already explicitly rectangular. WM_SIZE / WM_WINDOWPOSCHANGED
+    // re-apply this on every resize.
+    applyRectRegion(hwnd);
 }
 } // namespace
 #endif // _WIN32
@@ -216,6 +408,14 @@ std::string Window::openFolderDialog(const std::string& title) {
 #else
     (void)title;
     return {};
+#endif
+}
+
+void Window::setLiveResizeCallback(std::function<void()> cb) {
+#ifdef _WIN32
+    s_liveResizeCb = std::move(cb);
+#else
+    (void)cb;
 #endif
 }
 

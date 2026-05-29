@@ -27,8 +27,9 @@ public:
     void resize(VulkanContext& context, VkImageView hdrView, VkExtent2D sceneExtent);
 
     // Run the full downsample + upsample chain. Caller must NOT be inside another
-    // render pass when this is called.
-    void render(VkCommandBuffer cmd);
+    // render pass when this is called. threshold/knee drive the brightpass; both
+    // come from the active EnvironmentComponent.
+    void render(VkCommandBuffer cmd, float threshold, float knee);
 
     // Bloom result for the composite pass to sample.
     VkImageView getResultView() const { return m_mipViews.empty() ? VK_NULL_HANDLE : m_mipViews[0]; }

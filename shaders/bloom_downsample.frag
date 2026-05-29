@@ -11,7 +11,9 @@ layout(set = 0, binding = 0) uniform sampler2D src;
 layout(push_constant) uniform PC {
     float invTexelX;
     float invTexelY;
-    float strength;    // unused for downsample
+    float threshold;   // luminance below which contribution rolls off to 0
+    float knee;        // soft-knee half-width around the threshold
+    float strength;    // unused here; carried for parity with composite
     float mode;        // 0 = brightpass extract, 1 = plain downsample
 } pc;
 
@@ -26,15 +28,12 @@ float karisWeight(vec3 c) { return 1.0 / (1.0 + lum(c)); }
 // don't suddenly pop. Threshold 1.0 means we extract anything brighter than the
 // LDR clamp would have allowed.
 vec3 brightpass(vec3 c) {
-    // The engine's analytic-sky IBL puts most "bright" pixels in the 0.5–1.5 range
-    // rather than the 5+ a true HDR scene would. Threshold sits at 0.6 so brightish
-    // pixels (orange horizon, gold trim, helmet metal) actually contribute, with a
-    // soft knee so the transition isn't binary.
-    const float THRESH = 0.6;
-    const float KNEE   = 0.4;
+    // Threshold + knee drive the soft-knee smoothstep: below threshold-knee the
+    // contribution is 0, above threshold+knee it's full, smooth in between.
+    // Values come from the EnvironmentComponent so the editor can tune them live.
     float l = lum(c);
-    float t = clamp((l - THRESH + KNEE) / max(KNEE * 2.0, 1e-5), 0.0, 1.0);
-    float w = t * t * (3.0 - 2.0 * t);    // smoothstep
+    float t = clamp((l - pc.threshold + pc.knee) / max(pc.knee * 2.0, 1e-5), 0.0, 1.0);
+    float w = t * t * (3.0 - 2.0 * t);
     return c * w;
 }
 
