@@ -29,6 +29,7 @@ struct MaterialParams {
     float hasNormalMap     = 0.0f;  // 1 = sample set-1 binding 2 (else use geometric normal)
     float hasMetalRoughMap = 0.0f;  // 1 = sample set-1 binding 3 (else use metallic/roughness factors)
     float alphaCutoff      = 0.0f;  // >0 = alpha-masked (cutout) at this threshold; 0 = opaque
+    float subsurface       = 0.0f;  // 0 = off; >0 = wrap-diffuse + back-translucency (skin/wax)
 };
 
 // Global data shared across all draws — set 0, binding 0

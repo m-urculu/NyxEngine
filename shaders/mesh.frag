@@ -104,6 +104,7 @@ layout(set = 1, binding = 1) uniform MaterialUBO {
     float hasNormalMap;
     float hasMetalRoughMap;
     float alphaCutoff;        // >0 = alpha-masked (cutout): discard fragments below this
+    float subsurface;         // 0 = off; >0 = wrap-diffuse + back-translucency (skin/wax)
 } material;
 
 layout(location = 0) out vec4 outColor;
@@ -201,10 +202,12 @@ void main() {
             pointFalloff = 1.0 / (1.0 + (dist * dist) / (r * r));
         }
 
-        // Back-facing surfaces contribute nothing — skip all the GGX math entirely.
-        // For 3 lights this is a meaningful saving on roughly half the pixels.
-        float NdotL = dot(N, L);
-        if (NdotL <= 0.0) continue;
+        // Back-facing surfaces normally contribute nothing — skip all the GGX math.
+        // With subsurface on, light wraps past the terminator and transmits through
+        // thin geometry, so back-facing fragments still receive light: keep them.
+        float NdotL  = dot(N, L);
+        if (NdotL <= 0.0 && material.subsurface <= 0.0) continue;
+        float NdotLc = max(NdotL, 0.0);   // clamped cosine for specular + energy
 
         vec3 radiance = light.colorAndIntensity.xyz * light.colorAndIntensity.w * pointFalloff;
         if (light.positionAndType.w < 0.5) {
@@ -223,12 +226,28 @@ void main() {
         vec3  F   = fresnelSchlick(max(dot(H, V), 0.0), F0);
 
         vec3 specular = (NDF * G * F)
-                      / max(4.0 * max(dot(N, V), 0.0) * NdotL, 1e-4);
+                      / max(4.0 * max(dot(N, V), 0.0) * NdotLc, 1e-4);
 
         vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+
+        // Wrap diffuse: softens the terminator so light bleeds slightly past 90°,
+        // mimicking shallow subsurface scattering (skin/wax/leaves). At subsurface=0
+        // this is exactly the original Lambert term (NdotLc).
+        float diffND = NdotLc;
+        if (material.subsurface > 0.0) {
+            float w = material.subsurface;
+            diffND  = max((NdotL + w) / (1.0 + w), 0.0);
+        }
         // Diffuse intentionally not divided by PI so brightness matches the engine's
-        // existing light intensities.
-        Lo += (kD * albedo + specular) * radiance * NdotL;
+        // existing light intensities. Specular keeps the clamped cosine.
+        Lo += kD * albedo * diffND * radiance + specular * NdotLc * radiance;
+
+        // Back-translucency: a crude transmission lobe for light passing through thin
+        // geometry toward the eye (ear rims, nostrils, foliage edges).
+        if (material.subsurface > 0.0) {
+            float back = pow(clamp(dot(V, -L), 0.0, 1.0), 4.0) * material.subsurface;
+            Lo += kD * albedo * back * radiance;
+        }
     }
 
     // ── Analytic-sky IBL ────────────────────────────────────────────────────────

@@ -21,6 +21,7 @@ struct MaterialComponent {
     float metallic  = 0.0f;
     float roughness = 0.5f;
     float alphaCutoff = 0.0f;   // >0 = alpha-masked: render two-sided via the cutout pipeline
+    float subsurface = 0.0f;    // 0 = off; >0 = wrap-diffuse + back-translucency (skin/wax/foliage)
 
     // Display name of the albedo source, shown in the editor Inspector
     // (e.g. "logo.png" / "stone.mat"); empty means the default white texture.

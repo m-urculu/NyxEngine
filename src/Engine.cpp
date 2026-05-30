@@ -1,15 +1,18 @@
 #include "Engine.h"
 #include "Logger.h"
 #include "Input.h"
+#include "ui/Splash.h"
 #include "renderer/Vertex.h"
 #include "renderer/UniformTypes.h"
 #include "renderer/Buffer.h"
 #include "renderer/ObjLoader.h"
 #include "renderer/GltfLoader.h"
+#include "renderer/AssimpLoader.h"
 #include "renderer/Texture.h"
 #include "renderer/Mesh.h"
 #include "ecs/components/TransformComponent.h"
 #include "ecs/components/MeshComponent.h"
+#include "ecs/components/NameComponent.h"
 #include "ecs/components/MaterialComponent.h"
 #include "ecs/components/LightComponent.h"
 #include "ecs/components/SkinComponent.h"
@@ -41,7 +44,7 @@ bool isAssignableImage(const std::string& ext) {
     return img.count(ext) > 0;
 }
 bool isModelFile(const std::string& ext) {
-    static const std::set<std::string> m = {".obj", ".gltf", ".glb"};
+    static const std::set<std::string> m = {".obj", ".gltf", ".glb", ".fbx", ".dae"};
     return m.count(ext) > 0;
 }
 std::string toLowerExt(const std::string& path) {
@@ -159,6 +162,38 @@ float distToSeg(const glm::vec2& p, const glm::vec2& a, const glm::vec2& b) {
     glm::vec2 q = a + ab * t, e = p - q;
     return std::sqrt(e.x * e.x + e.y * e.y);
 }
+
+// Last-project persistence. Path: %APPDATA%\Nyx\last_project.txt on Windows.
+// Read at startup so the editor reopens the last-used project; written on
+// init success and on every Engine::switchProject.
+std::filesystem::path nyxLastProjectFilePath() {
+#ifdef _WIN32
+    const char* appdata = std::getenv("APPDATA");
+    if (!appdata || !*appdata) return {};
+    return std::filesystem::path(appdata) / "Nyx" / "last_project.txt";
+#else
+    return {};
+#endif
+}
+std::string readLastProjectPath() {
+    auto p = nyxLastProjectFilePath();
+    if (p.empty() || !std::filesystem::exists(p)) return {};
+    std::ifstream f(p);
+    std::string line;
+    if (!std::getline(f, line)) return {};
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r' ||
+                              line.back() == ' '  || line.back() == '\t'))
+        line.pop_back();
+    return line;
+}
+void writeLastProjectPath(const std::string& path) {
+    auto p = nyxLastProjectFilePath();
+    if (p.empty()) return;
+    std::error_code ec;
+    std::filesystem::create_directories(p.parent_path(), ec);
+    std::ofstream f(p, std::ios::trunc);
+    if (f) f << path << "\n";
+}
 } // namespace
 
 Engine::Engine() = default;
@@ -199,7 +234,24 @@ void Engine::init(StatusFn onStatus) {
     Logger::init();
     LOG_INFO("=== Nyx v0.3.0 (Phase 3B) ===");
 
+    // Re-open the last project the user worked in. Falls back to the default
+    // m_projectPath ("projects/Sandbox") on first run or if the saved folder
+    // no longer exists.
+    {
+        std::string last = readLastProjectPath();
+        if (!last.empty() && std::filesystem::exists(last)) {
+            m_projectPath = std::filesystem::path(last).generic_string();
+            LOG_INFO("Reopening last project: {}", m_projectPath);
+        }
+    }
+
     status("Opening window...", 0.02f);
+    // Always open at the default 1280×720 — the previous "persist window pos +
+    // size + maximize flag" path was too fragile across monitor reconfigs and
+    // borderless-vs-decorated maximize handling, and it left the UI clipped
+    // when restored to a maximize-overhang position without re-maximizing.
+    // Users resize / maximize each session; that's what a regular Windows app
+    // does.
     m_window = std::make_unique<Window>("Nyx Engine", 1280, 720);
 
     status("Initialising Vulkan...", 0.08f);
@@ -320,7 +372,10 @@ void Engine::init(StatusFn onStatus) {
         else if (ext == ".mat")       m_editor.openMaterial(path);
         else if (imageExt.count(ext)) m_editor.openImage(path);
         else if (textExt.count(ext))  m_editor.openFile(path);
-        else                          m_editor.openBinary(path);
+        // Unknown / binary types are intentionally not opened in the code
+        // editor — the hex preview was rarely useful and noisy on accidental
+        // double-clicks of .spv / .ttf / random assets.
+        else LOG_INFO("Skipping unknown file type in code editor: {}", path);
     });
     m_contentBrowser.setPathRemovedCallback([this](const std::string& path) {
         m_editor.closePath(path);
@@ -332,13 +387,38 @@ void Engine::init(StatusFn onStatus) {
         else if (action == "savescene") saveCurrentScene();
         else if (action == "exit")    glfwSetWindowShouldClose(m_window->getHandle(), GLFW_TRUE);
         else if (action == "openproject") {
-            std::string dir = m_window->openFolderDialog("Open Project Folder");
-            if (!dir.empty()) m_contentBrowser.setProject(dir);
+            // Steer the picker to the engine's projects/ root (parent of the
+            // currently-open project) so the user is browsing sibling projects
+            // rather than whatever folder Windows last remembered.
+            namespace fs = std::filesystem;
+            fs::path parent = fs::path(m_projectPath).parent_path();
+            std::string startDir = parent.empty() ? std::string("projects")
+                                                  : parent.generic_string();
+            std::string dir = m_window->openFolderDialog("Open Project Folder", startDir);
+            if (!dir.empty()) switchProject(dir);
         }
+    });
+    // New Project / Switch Project from the browser menus route here. Engine
+    // owns the full save-current / clear-state / load-new flow + persists
+    // the choice across sessions.
+    m_contentBrowser.setSwitchProjectCallback([this](const std::string& path) {
+        switchProject(path);
     });
 
     // Scene Hierarchy → selection drives the Inspector; commands act on the selection.
     m_hierarchy.setSelectCallback([this](Entity e) { m_selectedEntity = e; });
+    m_hierarchy.setRenameCommitCallback([this](Entity e, std::string name) {
+        if (e == NULL_ENTITY) return;
+        // Empty name → remove the NameComponent so the hierarchy falls back to
+        // the kind-derived default label.
+        if (name.empty()) {
+            if (m_registry.has<NameComponent>(e)) m_registry.pool<NameComponent>().remove(e);
+        } else {
+            if (m_registry.has<NameComponent>(e)) m_registry.get<NameComponent>(e).name = name;
+            else                                  m_registry.assign<NameComponent>(e, NameComponent{name});
+        }
+        m_sceneDirty = true;
+    });
     m_hierarchy.setCommandCallback([this](SceneHierarchy::Command c) {
         switch (c) {
             case SceneHierarchy::Command::Delete:    deleteSelection();    break;
@@ -346,6 +426,16 @@ void Engine::init(StatusFn onStatus) {
             case SceneHierarchy::Command::Cut:       cutSelection();       break;
             case SceneHierarchy::Command::Paste:     pasteClipboard();     break;
             case SceneHierarchy::Command::Duplicate: duplicateSelection(); break;
+            case SceneHierarchy::Command::Group:     groupSelected();      break;
+            case SceneHierarchy::Command::Ungroup:   ungroupSelected();    break;
+            case SceneHierarchy::Command::Rename: {
+                if (m_hierarchy.selection().empty()) break;
+                Entity e = m_hierarchy.selection().back();
+                std::string initial;
+                if (m_registry.has<NameComponent>(e)) initial = m_registry.get<NameComponent>(e).name;
+                m_hierarchy.startRename(e, initial);
+                break;
+            }
         }
     });
     // Double-click in the hierarchy → camera frames the entity (Maya/Unity "F").
@@ -366,8 +456,11 @@ void Engine::init(StatusFn onStatus) {
     // capture stale or unrelated entities (e.g. a viewport-pick after a hierarchy
     // multi-select) and record a no-op delta — making undo skip the actual edit.
     m_inspector.setBeginEditCallback([this]() {
-        std::vector<Entity> sel;
-        if (m_selectedEntity != NULL_ENTITY) sel.push_back(m_selectedEntity);
+        // Snapshot every entity in the hierarchy selection so a group scrub
+        // (Inspector applies the same delta to all selected) can be undone in
+        // one Ctrl+Z. Falls back to the primary if the hierarchy is empty.
+        std::vector<Entity> sel = m_hierarchy.selection();
+        if (sel.empty() && m_selectedEntity != NULL_ENTITY) sel.push_back(m_selectedEntity);
         beginTransformUndo(sel);
     });
     m_inspector.setOnEditCallback([this]() { m_sceneDirty = true; });
@@ -406,6 +499,7 @@ void Engine::init(StatusFn onStatus) {
     Input::setSaveSceneCallback([this]() { saveCurrentScene(); });
     Input::setUndoCallback([this]() { undo(); });
     Input::setRedoCallback([this]() { redo(); });
+    Input::setGroupSelectedCallback([this]() { groupSelected(); });
     Input::setViewportPressCallback([this](double mx, double my) { onViewportPress(mx, my); });
     Input::setViewportZoomCallback([this](double sy) { m_camera.dolly(static_cast<float>(sy), selectionPivot()); });
     Input::setRightDockResizeCallback([this]() {
@@ -422,6 +516,17 @@ void Engine::init(StatusFn onStatus) {
 
     float aspect = static_cast<float>(m_window->getWidth()) / static_cast<float>(m_window->getHeight());
     m_camera.init({0.0f, 2.0f, 6.0f}, aspect);
+
+    // loadEditorPrefs() ran before the camera existed, so the saved camera pose
+    // was buffered into m_pendingCameraPose. Apply it here so the editor opens
+    // looking at the same view you left it in.
+    if (m_pendingCameraPose.has) {
+        m_camera.setPose(m_pendingCameraPose.position,
+                         m_pendingCameraPose.yaw,
+                         m_pendingCameraPose.pitch);
+        m_camera.setFov(m_pendingCameraPose.fov);
+        m_pendingCameraPose.has = false;
+    }
 
     m_time.init();
 
@@ -454,15 +559,20 @@ void Engine::init(StatusFn onStatus) {
 
     status("Ready.", 1.0f);
     m_statusFn = nullptr;   // splash is about to close
+    // Persist whichever project is now loaded so future launches reopen it
+    // even after a clean first-run (where last_project.txt didn't exist yet).
+    writeLastProjectPath(m_projectPath);
     LOG_INFO("Engine initialized successfully!");
 }
 
 void Engine::run() {
     LOG_INFO("Entering main loop");
 
-    // Wire the WndProc's live-resize hook so dragging a window edge repaints
-    // continuously instead of waiting for the modal resize loop to exit.
-    Window::setLiveResizeCallback([this]() { renderOneFrame(); });
+    // Note: live content updates during a Win32 modal resize/move drag are
+    // a known limitation of Vulkan/DXGI windows — DWM caches the last frame
+    // and only resumes picking up new presents after WM_EXITSIZEMOVE. The
+    // window itself still resizes live; just the rendered contents update
+    // on release. Matches typical Vulkan game/engine behavior.
 
     // Reveal the main window now that the editor is fully initialised. Created
     // hidden in Window — see GLFW_VISIBLE hint — so the splash owns the screen
@@ -492,7 +602,11 @@ void Engine::run() {
         }
 
         // Title bar visibility and interaction
+        // The OS draws the title bar now, so hide the in-engine CAPTION
+        // (logo, "Nyx Engine" text, min/max/close buttons). Keep the widget
+        // itself "visible" so the FPS overlay (top-right) still renders.
         m_titleBar.setVisible(!m_window->isFullscreen());
+        m_titleBar.setCaptionVisible(false);
         bool cursorFree = !Input::isCursorCaptured();
         m_titleBar.update(static_cast<float>(m_window->getWidth()),
                           static_cast<float>(m_window->getHeight()), cursorFree,
@@ -588,6 +702,7 @@ void Engine::run() {
             }
             bool selAnim = false;
             for (const auto& clip : m_animClips) { for (const auto& ch : clip.channels) if (ch.target == m_selectedEntity) { selAnim = true; break; } if (selAnim) break; }
+            m_inspector.setSelectionGroup(m_hierarchy.selection());
             m_inspector.update(m_registry, m_selectedEntity, dragCompat, dockX, rightDockW, inspTop, winH - inspTop, cursorFree,
                                !m_animClips.empty(), m_animPlaying, selAnim);
         }
@@ -611,7 +726,8 @@ void Engine::run() {
                     || m_contentBrowser.wantsPointerCursor()
                     || m_inspector.wantsPointerCursor()
                     || m_console.wantsPointerCursor()
-                    || m_hierarchy.wantsPointerCursor())
+                    || m_hierarchy.wantsPointerCursor()
+                    || m_editor.wantsPointerCursor())
                     shape = GLFW_HAND_CURSOR;
             }
             m_titleBar.applyCursor(shape);
@@ -692,6 +808,72 @@ bool Engine::overHierSplitEdge() const {
     return std::fabs(my - splitY) <= HIER_SPLIT_GRAB;
 }
 
+glm::vec3 Engine::entitiesPivot(const std::vector<Entity>& ents) {
+    constexpr float INF = std::numeric_limits<float>::infinity();
+    glm::vec3 mn{ INF,  INF,  INF};
+    glm::vec3 mx{-INF, -INF, -INF};
+    bool any = false;
+
+    // Pre-compute parent → children adjacency once so we can walk descendants
+    // of each input entity. Without this, grouping a Group (or selecting a
+    // group whose children own the visible meshes) gives a degenerate AABB at
+    // the group's pivot — the gizmo lands at the centroid but doesn't track
+    // the actual visual centre of the meshes living below.
+    auto& tfPool = m_registry.pool<TransformComponent>();
+    std::unordered_map<Entity, std::vector<Entity>> kids;
+    for (size_t i = 0; i < tfPool.size(); ++i) {
+        Entity e = tfPool.getEntity(i);
+        Entity p = tfPool[i].parent;
+        if (p != NULL_ENTITY) kids[p].push_back(e);
+    }
+
+    auto growBy = [&](Entity e) {
+        if (!m_registry.has<TransformComponent>(e)) return false;
+        const auto& tc = m_registry.get<TransformComponent>(e);
+        if (m_registry.has<MeshComponent>(e) && m_registry.get<MeshComponent>(e).mesh) {
+            const Mesh* mesh = m_registry.get<MeshComponent>(e).mesh;
+            const glm::vec3& lmn = mesh->boundsMin();
+            const glm::vec3& lmx = mesh->boundsMax();
+            for (int i = 0; i < 8; ++i) {
+                glm::vec3 c{ (i & 1) ? lmx.x : lmn.x,
+                             (i & 2) ? lmx.y : lmn.y,
+                             (i & 4) ? lmx.z : lmn.z };
+                glm::vec3 w = glm::vec3(tc.worldMatrix * glm::vec4(c, 1.0f));
+                mn = glm::min(mn, w);
+                mx = glm::max(mx, w);
+            }
+            return true;
+        }
+        return false;   // empty/group entity → contributes nothing on its own
+    };
+
+    std::function<void(Entity)> walk = [&](Entity e) {
+        if (growBy(e)) any = true;
+        auto it = kids.find(e);
+        if (it == kids.end()) return;
+        for (Entity c : it->second) walk(c);
+    };
+
+    for (Entity e : ents) walk(e);
+
+    // If nothing in the walk carried a mesh, fall back to pivot points so we
+    // still return something sensible (a group with no descendants, a lone
+    // empty entity, ...).
+    if (!any) {
+        for (Entity e : ents) {
+            if (!m_registry.has<TransformComponent>(e)) continue;
+            glm::vec3 w = glm::vec3(m_registry.get<TransformComponent>(e).worldMatrix[3]);
+            mn = glm::min(mn, w);
+            mx = glm::max(mx, w);
+            any = true;
+        }
+    }
+    if (any) return (mn + mx) * 0.5f;
+
+    // Nothing in the set → orbit/zoom around a point in front of the camera.
+    return m_camera.getPosition() + m_camera.getFront() * 6.0f;
+}
+
 glm::vec3 Engine::selectionPivot() {
     // Centre of the **union world-space AABB** across all selected meshes. Averaging
     // per-primitive bbox-centres (the old behaviour) drifted off the visual middle
@@ -702,41 +884,7 @@ glm::vec3 Engine::selectionPivot() {
     // to the single primary entity.
     std::vector<Entity> ents(m_hierarchy.selection().begin(), m_hierarchy.selection().end());
     if (ents.empty() && m_selectedEntity != NULL_ENTITY) ents.push_back(m_selectedEntity);
-
-    constexpr float INF = std::numeric_limits<float>::infinity();
-    glm::vec3 mn{ INF,  INF,  INF};
-    glm::vec3 mx{-INF, -INF, -INF};
-    bool any = false;
-
-    for (Entity e : ents) {
-        if (!m_registry.has<TransformComponent>(e)) continue;
-        const auto& tc = m_registry.get<TransformComponent>(e);
-        if (m_registry.has<MeshComponent>(e) && m_registry.get<MeshComponent>(e).mesh) {
-            const Mesh* mesh = m_registry.get<MeshComponent>(e).mesh;
-            const glm::vec3& lmn = mesh->boundsMin();
-            const glm::vec3& lmx = mesh->boundsMax();
-            // Transform all 8 local-bbox corners and grow the world-space AABB.
-            for (int i = 0; i < 8; ++i) {
-                glm::vec3 c{ (i & 1) ? lmx.x : lmn.x,
-                             (i & 2) ? lmx.y : lmn.y,
-                             (i & 4) ? lmx.z : lmn.z };
-                glm::vec3 w = glm::vec3(tc.worldMatrix * glm::vec4(c, 1.0f));
-                mn = glm::min(mn, w);
-                mx = glm::max(mx, w);
-                any = true;
-            }
-        } else {
-            // No mesh → use origin as a degenerate 0-size box at that point.
-            glm::vec3 w = glm::vec3(tc.worldMatrix[3]);
-            mn = glm::min(mn, w);
-            mx = glm::max(mx, w);
-            any = true;
-        }
-    }
-    if (any) return (mn + mx) * 0.5f;
-
-    // Nothing selected → orbit/zoom around a point in front of the camera.
-    return m_camera.getPosition() + m_camera.getFront() * 6.0f;
+    return entitiesPivot(ents);
 }
 
 void Engine::ensurePointLightGizmo(Entity e) {
@@ -909,10 +1057,11 @@ void Engine::updateSkins() {
 }
 
 void Engine::renderOneFrame() {
-    // Re-query the window's current framebuffer size — during a modal Win32
-    // resize loop, getWidth/getHeight is updated by the GLFW callback chained
-    // off WM_SIZE in our WndProc, which fires synchronously before this
-    // function. Skip on minimised (0 × 0) windows.
+    // Re-query the window's current framebuffer size. During a modal Win32
+    // resize loop this runs on the resize thread (see startResizeThread);
+    // otherwise it runs on the main thread. Either way getWidth/getHeight
+    // reflects the latest WM_SIZE delivered by GLFW. Skip on minimised
+    // (0 × 0) windows.
     int w = m_window->getWidth();
     int h = m_window->getHeight();
     if (w <= 0 || h <= 0) return;
@@ -940,19 +1089,15 @@ void Engine::handleResize() {
     int height = m_window->getHeight();
     if (width == 0 || height == 0) return;
 
-    LOG_INFO("Handling resize to {}x{}", width, height);
-
     m_renderer.waitIdle(m_vulkanContext.getDevice());
 
+    // Only the swapchain (images sized to the new client area) and the
+    // framebuffers (which reference those images) depend on window
+    // dimensions. All pipelines use VK_DYNAMIC_STATE_VIEWPORT and
+    // VK_DYNAMIC_STATE_SCISSOR, so they don't need rebuilding on a size
+    // change — that was costing ~14 shader reloads per WM_SIZE during a
+    // modal resize drag and freezing the visible frame.
     m_swapchain.recreate(m_vulkanContext, width, height);
-    m_pipeline.recreate(m_vulkanContext, m_swapchain.getExtent(), m_swapchain.getImageFormat(),
-                         VK_FORMAT_R16G16B16A16_SFLOAT,
-                         m_swapchain.getDepthBuffer().getFormat(),
-                         m_descriptors.getGlobalLayout(), m_descriptors.getMaterialLayout(),
-                         m_descriptors.getJointLayout());
-    m_uiPipeline.recreate(m_vulkanContext, m_pipeline.getCompositeRenderPass());
-    m_imagePipeline.recreate(m_vulkanContext, m_pipeline.getCompositeRenderPass());
-    m_matPreviewPipeline.recreate(m_vulkanContext, m_pipeline.getCompositeRenderPass());
     m_renderer.recreateFramebuffers(m_vulkanContext, m_swapchain, m_pipeline);
 
     m_camera.setAspectRatio(static_cast<float>(width) / static_cast<float>(height));
@@ -1160,10 +1305,20 @@ Mesh* Engine::resolveMesh(const std::string& source) {
         std::string path = (hash == std::string::npos) ? rest : rest.substr(0, hash);
         int idx = (hash == std::string::npos) ? 0 : std::atoi(rest.substr(hash + 1).c_str());
         if (!std::filesystem::exists(path)) { LOG_WARN("resolveMesh: missing glTF {}", path); return nullptr; }
+        // Same dispatch as loadGltfScene: glTF/glb → cgltf, everything else → Assimp.
+        // Otherwise a scene that saved an FBX entity (mesh source "gltf:foo.fbx#N")
+        // would fail to reload because cgltf can't parse FBX.
         std::vector<GltfMeshData> datas;
-        try { datas = GltfLoader::load(path); }
-        catch (const std::exception& ex) { LOG_ERROR("resolveMesh: glTF '{}' failed to load: {}", path, ex.what()); return nullptr; }
-        if (idx < 0 || idx >= (int)datas.size()) { LOG_WARN("resolveMesh: glTF {} has no primitive {}", path, idx); return nullptr; }
+        try {
+            std::string ext = toLowerExt(path);
+            if (ext == ".gltf" || ext == ".glb")
+                datas = GltfLoader::load(path);
+            else
+                datas = AssimpLoader::loadImport(path).primitives;
+        } catch (const std::exception& ex) {
+            LOG_ERROR("resolveMesh: '{}' failed to load: {}", path, ex.what()); return nullptr;
+        }
+        if (idx < 0 || idx >= (int)datas.size()) { LOG_WARN("resolveMesh: '{}' has no primitive {}", path, idx); return nullptr; }
         return m_resourceCache.getOrCreateMesh(m_vulkanContext, path + "#" + std::to_string(idx),
                                                datas[idx].vertices, datas[idx].indices);
     }
@@ -1190,6 +1345,7 @@ void Engine::assignMaterialToSelected(const std::string& assetPath) {
     params.baseColorFactor = mat.baseColorFactor;
     params.metallic        = mat.metallic;
     params.roughness       = mat.roughness;
+    params.subsurface      = mat.subsurface;
 
     Texture*    tex = mat.texture ? mat.texture : m_resourceCache.getDefaultTexture();
     std::string displayName;
@@ -1208,9 +1364,10 @@ void Engine::assignMaterialToSelected(const std::string& assetPath) {
             std::istringstream ss(lineStr);
             std::string key; ss >> key;
             if      (key == "baseColor") { glm::vec4 c = params.baseColorFactor; ss >> c.r >> c.g >> c.b; if (!(ss >> c.a)) c.a = 1.0f; params.baseColorFactor = c; }
-            else if (key == "metallic")  ss >> params.metallic;
-            else if (key == "roughness") ss >> params.roughness;
-            else if (key == "albedo")    std::getline(ss, albedoRel);    // rest of line = path
+            else if (key == "metallic")   ss >> params.metallic;
+            else if (key == "roughness")  ss >> params.roughness;
+            else if (key == "subsurface") ss >> params.subsurface;
+            else if (key == "albedo")     std::getline(ss, albedoRel);    // rest of line = path
         }
         if (size_t s = albedoRel.find_first_not_of(" \t"); s != std::string::npos) albedoRel = albedoRel.substr(s);
         else albedoRel.clear();
@@ -1246,6 +1403,7 @@ void Engine::assignMaterialToSelected(const std::string& assetPath) {
     mat.baseColorFactor = params.baseColorFactor;
     mat.metallic        = params.metallic;
     mat.roughness       = params.roughness;
+    mat.subsurface      = params.subsurface;
     mat.descriptorSet   = newSet;
     mat.albedoName      = displayName;
     mat.albedoPath      = texPath;
@@ -1454,7 +1612,21 @@ void Engine::updateGizmo(float winW, float winH, bool cursorActive) {
                 m_hierarchy.setSelection(hits);
             } else {
                 Entity hit = pickEntity(cx, cy, winW, winH);
-                m_hierarchy.setSelection(hit != NULL_ENTITY ? std::vector<Entity>{hit} : std::vector<Entity>{});
+                if (m_vpAdditive) {
+                    // Ctrl/Shift+click toggles the hit entity in the existing
+                    // selection (no toggle on background clicks — those just
+                    // keep the selection intact, matching Unity / Maya).
+                    std::vector<Entity> sel = m_hierarchy.selection();
+                    if (hit != NULL_ENTITY) {
+                        auto it = std::find(sel.begin(), sel.end(), hit);
+                        if (it != sel.end()) sel.erase(it);
+                        else                 sel.push_back(hit);
+                    }
+                    m_hierarchy.setSelection(sel);
+                } else {
+                    m_hierarchy.setSelection(hit != NULL_ENTITY ? std::vector<Entity>{hit}
+                                                                : std::vector<Entity>{});
+                }
             }
             m_vpLeftDown = false;
             m_vpMarquee  = false;
@@ -1562,7 +1734,14 @@ void Engine::buildDemoScene() {
 Entity Engine::loadGltfScene(const std::string& filepath, const glm::vec3& position, float rootScale) {
     GltfImport imp;
     try {
-        imp = GltfLoader::loadImport(filepath);   // throws if the file/buffers/URIs are missing
+        // Pick the loader by extension. glTF/glb → cgltf (skinning + anim).
+        // Everything else assimp can read (.fbx/.dae/.obj/...) goes through
+        // AssimpLoader, which yields the same GltfImport shape.
+        std::string ext = toLowerExt(filepath);
+        if (ext == ".gltf" || ext == ".glb")
+            imp = GltfLoader::loadImport(filepath);
+        else
+            imp = AssimpLoader::loadImport(filepath);
     } catch (const std::exception& ex) {
         LOG_ERROR("loadGltfScene: '{}' failed to load: {}", filepath, ex.what());
         return NULL_ENTITY;                        // abort the spawn instead of crashing
@@ -1766,16 +1945,36 @@ void Engine::spawnModel(const std::string& path, const glm::vec3& position) {
     std::string ext = toLowerExt(path);
     Entity created = NULL_ENTITY;
 
-    if (ext == ".obj") {
-        std::string src = "obj:" + path;
-        Mesh* mesh = resolveMesh(src);
-        if (!mesh) { LOG_ERROR("spawnModel: failed to load {}", path); return; }
-        created = createMeshEntity(mesh, m_resourceCache.getDefaultTexture(), position,
-                                   {1,1,1}, {1,1,1,1}, 0.0f, 0.5f, src);
-    } else if (ext == ".gltf" || ext == ".glb") {
-        created = loadGltfScene(path, position);
-    } else {
-        LOG_WARN("spawnModel: '{}' is not a model (.obj/.gltf/.glb)", path);
+    // Large FBX (gladiator SK_*.fbx are 20-72 MB) can take many seconds to
+    // parse via Assimp on the main thread. Log on entry so the user can see
+    // "this is loading" instead of thinking the editor froze.
+    std::error_code ec;
+    auto sz = std::filesystem::file_size(path, ec);
+    if (!ec) LOG_INFO("spawnModel: loading '{}' ({} KB)…", path, sz / 1024);
+
+    try {
+        if (ext == ".obj") {
+            std::string src = "obj:" + path;
+            Mesh* mesh = resolveMesh(src);
+            if (!mesh) { LOG_ERROR("spawnModel: failed to load {}", path); return; }
+            created = createMeshEntity(mesh, m_resourceCache.getDefaultTexture(), position,
+                                       {1,1,1}, {1,1,1,1}, 0.0f, 0.5f, src);
+        } else if (ext == ".gltf" || ext == ".glb"
+                || ext == ".fbx"  || ext == ".dae") {
+            // Both glTF and assimp-handled formats end up in the same GltfImport
+            // shape, so loadGltfScene takes either one.
+            created = loadGltfScene(path, position);
+        } else {
+            LOG_WARN("spawnModel: '{}' is not a model (.obj/.gltf/.glb/.fbx/.dae)", path);
+            return;
+        }
+    } catch (const std::exception& ex) {
+        // Asset paths can throw deep inside the loader / texture cache / Vulkan
+        // upload. Don't let a bad import kill the whole editor.
+        LOG_ERROR("spawnModel: '{}' failed: {}", path, ex.what());
+        return;
+    } catch (...) {
+        LOG_ERROR("spawnModel: '{}' failed (unknown exception)", path);
         return;
     }
 
@@ -1913,6 +2112,12 @@ Entity Engine::ensureEnvironmentEntity() {
 void Engine::writeEntities(std::ostream& os, const std::vector<Entity>& ents) {
     for (Entity e : ents) {
         os << "entity " << e << "\n";
+        // User-set name on its own line (whole rest-of-line = the name, so
+        // spaces work). Read back via getline in readEntities.
+        if (m_registry.has<NameComponent>(e)) {
+            const auto& nc = m_registry.get<NameComponent>(e);
+            if (!nc.name.empty()) os << "name " << nc.name << "\n";
+        }
         // Skip Mesh + Material for light entities — they're auto-generated as
         // a viewport gizmo by ensurePointLightGizmo and would otherwise bloat
         // the scene file with the sphere primitive every save/load cycle.
@@ -1943,6 +2148,7 @@ void Engine::writeEntities(std::ostream& os, const std::vector<Entity>& ents) {
             if (!m.metalRoughPath.empty()) os << "rmap " << m.metalRoughPath << "\n";
             if (!m.occlusionPath.empty())  os << "omap " << m.occlusionPath << "\n";
             if (m.alphaCutoff > 0.0f)      os << "acut " << m.alphaCutoff << "\n";
+            if (m.subsurface > 0.0f)       os << "ssub " << m.subsurface << "\n";
         }
         if (m_registry.has<LightComponent>(e)) {
             const auto& l = m_registry.get<LightComponent>(e);
@@ -1988,7 +2194,7 @@ std::vector<Entity> Engine::readEntities(std::istream& is, const glm::vec3& posO
     struct PendingMat {
         bool has = false;
         glm::vec4 bc{1, 1, 1, 1};
-        float me = 0.0f, ro = 0.5f, alpha = 0.0f;
+        float me = 0.0f, ro = 0.5f, alpha = 0.0f, sub = 0.0f;
         std::string albedo, normal, metalrough, occlusion;
     };
     PendingMat pend;
@@ -2015,6 +2221,7 @@ std::vector<Entity> Engine::readEntities(std::istream& is, const glm::vec3& posO
         params.hasNormalMap     = nrmTex ? 1.0f : 0.0f;
         params.hasMetalRoughMap = mrTex  ? 1.0f : 0.0f;
         params.alphaCutoff      = pend.alpha;
+        params.subsurface       = pend.sub;
 
         Descriptors::MaterialMaps maps{};
         maps.baseColor  = albedoTex ? albedoTex : def;
@@ -2028,6 +2235,7 @@ std::vector<Entity> Engine::readEntities(std::istream& is, const glm::vec3& posO
         mat.metallic        = pend.me;
         mat.roughness       = pend.ro;
         mat.alphaCutoff     = pend.alpha;
+        mat.subsurface      = pend.sub;
         mat.albedoPath      = albedoTex ? pend.albedo : "";
         mat.albedoName      = albedoTex ? fs::path(pend.albedo).filename().string() : "";
         mat.normalPath      = nrmTex ? pend.normal     : "";
@@ -2096,6 +2304,11 @@ std::vector<Entity> Engine::readEntities(std::istream& is, const glm::vec3& posO
             std::string p; std::getline(ss, p); pend.occlusion  = trim(p);
         } else if (key == "acut") {
             ss >> pend.alpha;
+        } else if (key == "ssub") {
+            ss >> pend.sub;
+        } else if (key == "name") {
+            std::string n; std::getline(ss, n); n = trim(n);
+            if (!n.empty()) m_registry.assign<NameComponent>(cur, NameComponent{n});
         } else if (key == "light") {
             int type = 0; LightComponent lc{};
             ss >> type >> lc.color.r >> lc.color.g >> lc.color.b >> lc.intensity
@@ -2196,6 +2409,13 @@ void Engine::writeActionFile(const UndoAction& a) const {
         // Snapshot: file content IS the snapshot text. (Filename suffix .snap.)
         // The action's `serialized` field carries the snapshot text for this kind.
         f << a.serialized;
+        return;
+    }
+    if (a.kind == UndoAction::Kind::Group) {
+        // Group deltas don't persist across sessions yet — the entity IDs they
+        // reference are only stable within the live registry. Emit an empty
+        // marker so the file exists; loadUndoHistoryFromDisk skips it.
+        f << "group-volatile\n";
         return;
     }
 
@@ -2381,6 +2601,56 @@ void Engine::applyAction(UndoAction& a, bool forward) {
         case UndoAction::Kind::Scalar: {
             float v = forward ? a.newScalar : a.oldScalar;
             writeScalarTarget(a.scalarEntity, a.scalarTarget, v);
+            break;
+        }
+        case UndoAction::Kind::Group: {
+            if (forward) {
+                // Redo: recreate group, re-apply child reparents. The new ID may
+                // differ from the original — update the action so undo can find it.
+                Entity g = m_registry.createEntity();
+                TransformComponent gtc{};
+                gtc.position = a.groupPosition;
+                gtc.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+                gtc.scale    = glm::vec3(1.0f);
+                gtc.parent   = NULL_ENTITY;
+                m_registry.assign<TransformComponent>(g, gtc);
+                a.groupEntity = g;
+                for (auto& cr : a.childReparents) {
+                    if (!m_registry.has<TransformComponent>(cr.entity)) continue;
+                    auto& tc = m_registry.get<TransformComponent>(cr.entity);
+                    tc.position = cr.newPosition;
+                    tc.parent   = g;
+                    cr.newParent = g;
+                }
+                m_hierarchy.expandGroup(g);
+                m_hierarchy.setSelection({g});
+                m_inspector.setSelectionGroup({g});
+                m_selectedEntity = g;
+            } else {
+                // Undo: restore each child's old parent + local TRS, then destroy
+                // the group entity. Iterate in reverse so deeply-nested reparents
+                // peel off cleanly.
+                for (auto it = a.childReparents.rbegin(); it != a.childReparents.rend(); ++it) {
+                    if (!m_registry.has<TransformComponent>(it->entity)) continue;
+                    auto& tc = m_registry.get<TransformComponent>(it->entity);
+                    tc.position = it->oldPosition;
+                    tc.rotation = it->oldRotation;
+                    tc.scale    = it->oldScale;
+                    tc.parent   = it->oldParent;
+                }
+                if (a.groupEntity != NULL_ENTITY) {
+                    m_registry.destroyEntity(a.groupEntity);
+                    if (m_selectedEntity == a.groupEntity) m_selectedEntity = NULL_ENTITY;
+                }
+                // Restore selection to the original targets so the user picks up
+                // where they were before the group operation.
+                std::vector<Entity> orig;
+                orig.reserve(a.childReparents.size());
+                for (const auto& cr : a.childReparents) orig.push_back(cr.entity);
+                m_hierarchy.setSelection(orig);
+                m_inspector.setSelectionGroup(orig);
+                m_selectedEntity = orig.empty() ? NULL_ENTITY : orig.back();
+            }
             break;
         }
     }
@@ -2673,20 +2943,201 @@ void Engine::redo() {
     LOG_INFO("Redo ({} more available)", m_redoStack.size());
 }
 
+void Engine::groupSelected() {
+    auto selection = m_hierarchy.selection();
+    if (selection.empty()) {
+        LOG_INFO("Group: nothing selected");
+        return;
+    }
+
+    // Filter to entities with a transform so the centroid math is well-defined.
+    // A single item is fine — it becomes the only child of the new group, which
+    // is still useful for organising the hierarchy.
+    std::vector<Entity> targets;
+    targets.reserve(selection.size());
+    for (Entity e : selection)
+        if (e != NULL_ENTITY && m_registry.has<TransformComponent>(e)) targets.push_back(e);
+    if (targets.empty()) {
+        LOG_INFO("Group: no transformable entities in selection");
+        return;
+    }
+
+    // Ensure world matrices are current before reading them. The TransformSystem
+    // runs each frame, but groupSelected can fire mid-frame between a transform
+    // mutation and the next tick.
+    TransformSystem::update(m_registry);
+
+    // Centre the group on the **union world-space AABB** of the targets — same
+    // logic the camera-frame and gizmo pivot use. Averaging the entities'
+    // pivot positions instead would land the group at the base of meshes whose
+    // pivot sits at the foot (e.g. the gladiator's body part), not the visual
+    // centre.
+    auto worldPos = [this](Entity e) {
+        return glm::vec3(m_registry.get<TransformComponent>(e).worldMatrix[3]);
+    };
+    glm::vec3 centroid = entitiesPivot(targets);
+
+    // Build a delta-style undo entry: remember each target's old (parent, local
+    // TRS) so undo can put them back exactly where they were. The group entity
+    // is also recreated by the undo system from groupSerialized (mirrors how
+    // Kind::Spawn works), so ID continuity is preserved across redo cycles.
+    UndoAction action;
+    action.kind = UndoAction::Kind::Group;
+
+    // Empty parent entity at the world centroid.
+    Entity group = m_registry.createEntity();
+    TransformComponent gtc{};
+    gtc.position = centroid;
+    gtc.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    gtc.scale    = glm::vec3(1.0f);
+    gtc.parent   = NULL_ENTITY;
+    m_registry.assign<TransformComponent>(group, gtc);
+
+    // For each target: capture old TRS+parent, then re-express the world
+    // position in the new group's frame (G^-1 · W). G is translation-only here,
+    // so the local position is just (world - centroid) — and rotation/scale
+    // pass through unchanged.
+    action.groupEntity   = group;
+    action.groupPosition = centroid;
+    action.childReparents.reserve(targets.size());
+    for (Entity e : targets) {
+        auto& tc = m_registry.get<TransformComponent>(e);
+        UndoAction::ChildReparent cr{};
+        cr.entity      = e;
+        cr.oldParent   = tc.parent;
+        cr.oldPosition = tc.position;
+        cr.oldRotation = tc.rotation;
+        cr.oldScale    = tc.scale;
+        cr.newParent   = group;
+        cr.newPosition = worldPos(e) - centroid;
+
+        tc.position = cr.newPosition;
+        tc.parent   = cr.newParent;
+        // Rotation/scale unchanged — group has identity rot/scale.
+        action.childReparents.push_back(cr);
+    }
+
+    pushAction(std::move(action));
+
+    // Auto-expand the new group so the user can immediately see its children.
+    m_hierarchy.expandGroup(group);
+
+    // Select the new group so the user can move it immediately.
+    m_hierarchy.setSelection({group});
+    m_inspector.setSelectionGroup({group});
+    m_selectedEntity = group;
+
+    m_sceneDirty = true;
+    LOG_INFO("Grouped {} entities under new entity {}", targets.size(), group);
+}
+
+void Engine::ungroupSelected() {
+    auto selection = m_hierarchy.selection();
+    if (selection.empty()) { LOG_INFO("Ungroup: nothing selected"); return; }
+
+    // A "group" here is an entity with a TransformComponent but no Mesh / Light /
+    // Environment — i.e. one of the empty parents that groupSelected() created.
+    auto isGroup = [this](Entity e) {
+        if (e == NULL_ENTITY || !m_registry.has<TransformComponent>(e)) return false;
+        if (m_registry.has<MeshComponent>(e))        return false;
+        if (m_registry.has<LightComponent>(e))       return false;
+        if (m_registry.has<EnvironmentComponent>(e)) return false;
+        return true;
+    };
+
+    // Collect target groups + their children before we mutate anything (the pool
+    // changes underneath if we destroy entities mid-iteration).
+    struct Job { Entity group; std::vector<Entity> children; };
+    std::vector<Job> jobs;
+    std::unordered_set<Entity> selSet(selection.begin(), selection.end());
+    auto& tfPool = m_registry.pool<TransformComponent>();
+    for (Entity g : selection) {
+        if (!isGroup(g)) continue;
+        Job j; j.group = g;
+        for (size_t i = 0; i < tfPool.size(); ++i) {
+            Entity e = tfPool.getEntity(i);
+            if (tfPool[i].parent == g) j.children.push_back(e);
+        }
+        jobs.push_back(std::move(j));
+    }
+    if (jobs.empty()) {
+        LOG_INFO("Ungroup: no groups in selection (selection items must be empty parents)");
+        return;
+    }
+
+    pushUndo();
+
+    std::vector<Entity> orphaned;
+    for (auto& j : jobs) {
+        const auto& gtc = m_registry.get<TransformComponent>(j.group);
+        Entity newParent = gtc.parent;   // hoist children up one level (root if none)
+        // Promote children: their local position absorbs the group's local
+        // position so their world position is preserved. Rotation/scale of the
+        // group are identity from groupSelected(), but be defensive in case the
+        // user has scrubbed the group's transform.
+        for (Entity c : j.children) {
+            auto& ctc = m_registry.get<TransformComponent>(c);
+            ctc.position = gtc.position + gtc.rotation * (gtc.scale * ctc.position);
+            ctc.rotation = gtc.rotation * ctc.rotation;
+            ctc.scale    = gtc.scale * ctc.scale;
+            ctc.parent   = newParent;
+            orphaned.push_back(c);
+        }
+        m_registry.destroyEntity(j.group);
+    }
+
+    // Selecting the orphaned children gives the user something to act on next.
+    m_hierarchy.setSelection(orphaned);
+    m_inspector.setSelectionGroup(orphaned);
+    m_selectedEntity = orphaned.empty() ? NULL_ENTITY : orphaned.back();
+
+    m_sceneDirty = true;
+    LOG_INFO("Ungrouped {} group(s) → {} children", jobs.size(), orphaned.size());
+}
+
 void Engine::loadEditorPrefs() {
     std::ifstream f(m_projectPath + "/editor.prefs");
     if (!f) return;
-    std::string key;
-    while (f >> key) {
-        if      (key == "rightDockCollapsed") { int v = 0; f >> v; m_rightDockCollapsed = (v != 0); }
-        else if (key == "rightDockWidth")     f >> m_rightDockWidth;
-        else if (key == "hierarchyHeight")    f >> m_hierarchyHeight;
-        else if (key == "browserExpanded")    { int v = 0; f >> v; m_contentBrowser.setExpanded(v != 0); }
-        else if (key == "browserWidth")       { float v = 0; f >> v; m_contentBrowser.setPanelWidth(v); }
-        else if (key == "consoleExpanded")    { int v = 0; f >> v; m_console.setExpanded(v != 0); }
-        else if (key == "consoleHeight")      { float v = 0; f >> v; m_console.setPanelHeight(v); }
-        else { std::string skip; std::getline(f, skip); }
+    std::set<std::string> openFolders;
+    std::string line;
+    while (std::getline(f, line)) {
+        // Split into key + remainder. Single-token keys use the remainder as a
+        // single value; "browserOpenFolder" uses the whole remainder as a path
+        // (paths can contain spaces).
+        size_t sp = line.find(' ');
+        if (sp == std::string::npos) continue;
+        std::string key   = line.substr(0, sp);
+        std::string value = line.substr(sp + 1);
+        // strip leading spaces from value
+        size_t vs = value.find_first_not_of(' ');
+        if (vs != std::string::npos) value = value.substr(vs);
+
+        auto asInt   = [&]{ try { return std::stoi(value); }   catch (...) { return 0; } };
+        auto asFloat = [&]{ try { return std::stof(value); }   catch (...) { return 0.0f; } };
+
+        if      (key == "rightDockCollapsed") m_rightDockCollapsed = (asInt() != 0);
+        else if (key == "rightDockWidth")     m_rightDockWidth     = asFloat();
+        else if (key == "hierarchyHeight")    m_hierarchyHeight    = asFloat();
+        else if (key == "browserExpanded")    m_contentBrowser.setExpanded(asInt() != 0);
+        else if (key == "browserWidth")       m_contentBrowser.setPanelWidth(asFloat());
+        else if (key == "consoleExpanded")    m_console.setExpanded(asInt() != 0);
+        else if (key == "consoleHeight")      m_console.setPanelHeight(asFloat());
+        else if (key == "browserOpenFolder")  openFolders.insert(value);
+        else if (key == "camera") {
+            // "camera px py pz yaw pitch fov" — buffered now, applied after the
+            // camera is initialised (loadEditorPrefs runs early in startup).
+            std::istringstream cs(value);
+            glm::vec3 p; float yaw, pitch, fov;
+            if (cs >> p.x >> p.y >> p.z >> yaw >> pitch >> fov) {
+                m_pendingCameraPose.has      = true;
+                m_pendingCameraPose.position = p;
+                m_pendingCameraPose.yaw      = yaw;
+                m_pendingCameraPose.pitch    = pitch;
+                m_pendingCameraPose.fov      = fov;
+            }
+        }
     }
+    if (!openFolders.empty()) m_contentBrowser.setExpandedFolders(openFolders);
 }
 
 void Engine::saveEditorPrefs() {
@@ -2702,6 +3153,86 @@ void Engine::saveEditorPrefs() {
       << "browserWidth "       << m_contentBrowser.panelWidth()   << "\n"
       << "consoleExpanded "    << (m_console.isExpanded() ? 1 : 0) << "\n"
       << "consoleHeight "      << m_console.panelHeight()         << "\n";
+    {
+        glm::vec3 p = m_camera.getPosition();
+        f << "camera " << p.x << ' ' << p.y << ' ' << p.z << ' '
+          << m_camera.getYaw() << ' ' << m_camera.getPitch() << ' '
+          << m_camera.getFov() << "\n";
+    }
+    // Window pos/size persistence intentionally not written — see the
+    // comment in Engine::initialize() at the Window constructor.
+    // One line per open folder — getline-friendly so paths with spaces work.
+    for (const std::string& p : m_contentBrowser.expandedFolders())
+        f << "browserOpenFolder " << p << "\n";
+}
+
+void Engine::switchProject(const std::string& newPath) {
+    namespace fs = std::filesystem;
+    std::string normalized = fs::path(newPath).generic_string();
+    if (normalized.empty()) return;
+    if (normalized == m_projectPath) return;   // no-op
+
+    LOG_INFO("Switching project: '{}' -> '{}'", m_projectPath, normalized);
+
+    // The save/clear/load below blocks the main thread for several seconds on
+    // a real project (texture decodes alone). Throw up the same splash window
+    // we use at engine startup so the user sees progress instead of a frozen
+    // editor. Reuse m_statusFn so the existing status pings inside loadScene
+    // / loadGltfScene / loadUndoHistoryFromDisk pipe through automatically.
+    Nyx::Splash splash;
+    splash.show();
+    auto status = [&](const char* s, float p) { splash.setStatus(s, p); };
+    m_statusFn = [&](const std::string& s, float p) { splash.setStatus(s, p); };
+
+    // 1. Persist current project's state before we lose it.
+    status("Saving current project...", 0.05f);
+    saveCurrentScene();
+    saveEditorPrefs();
+
+    // 2. Tear down in-memory state belonging to the current project. waitIdle
+    //    inside clearScene ensures the GPU isn't still using anything we drop.
+    status("Closing open files...", 0.15f);
+    m_editor.closePath(m_projectPath);    // closes every tab whose path lives under the old project
+
+    status("Clearing scene...", 0.25f);
+    clearScene();
+    for (const auto& a : m_undoStack) { std::error_code ec; fs::remove(a.path, ec); }
+    for (const auto& a : m_redoStack) { std::error_code ec; fs::remove(a.path, ec); }
+    m_undoStack.clear();
+    m_redoStack.clear();
+    m_currentScenePath.clear();
+    m_sceneDirty = false;
+
+    // 3. Repoint and refresh.
+    status("Opening project...", 0.35f);
+    m_projectPath = normalized;
+    m_contentBrowser.setProject(m_projectPath);
+
+    // 4. Load the new project (scene + prefs + undo). Mirrors Engine::init's
+    //    project-loading block so the experience matches a fresh launch.
+    loadEditorPrefs();
+    std::string projectScene = m_projectPath + "/scenes/scene.scene";
+    if (fs::exists(projectScene)) {
+        status("Loading scene...", 0.5f);
+        loadScene(projectScene);
+    } else {
+        status("Building demo scene...", 0.5f);
+        buildDemoScene();
+        std::string gp = m_projectPath + "/assets/models/Gladiator/Gladiator.gltf";
+        if (fs::exists(gp)) {
+            status("Loading model: Gladiator...", 0.7f);
+            loadGltfScene(gp, {0.0f, 0.0f, -2.0f}, 1.5f);
+        }
+    }
+    status("Restoring undo history...", 0.95f);
+    loadUndoHistoryFromDisk();
+    status("Ready.", 1.0f);
+
+    // 5. Remember the choice across sessions.
+    writeLastProjectPath(m_projectPath);
+
+    m_statusFn = nullptr;
+    splash.close();
 }
 
 void Engine::saveCurrentScene() {

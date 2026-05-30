@@ -88,6 +88,22 @@ private:
     Gizmo                    m_gizmo;
     Camera                   m_camera;
 
+    // editor.prefs is read before m_camera.init(), so a saved pose is parked
+    // here and applied to the camera immediately after init runs.
+    struct PendingCameraPose {
+        bool      has = false;
+        glm::vec3 position{};
+        float     yaw = 0.0f, pitch = 0.0f, fov = 45.0f;
+    };
+    PendingCameraPose        m_pendingCameraPose;
+
+    // Window position parsed from editor.prefs before the window is created.
+    // Size is fed straight into the Window ctor (so the swapchain comes up at the
+    // right resolution); position is applied via Window::setPosition right after
+    // creation. -1 means "no saved value, let the OS pick".
+    struct PendingWindow { int x = -1, y = -1, w = 1280, h = 720; bool maximized = false; };
+    PendingWindow            m_pendingWindow;
+
     // Point-light shadow maps. Up to MAX_POINT_SHADOWS cube maps live for the
     // engine's lifetime; each frame, enabled point lights are assigned to
     // free slots. m_pointShadowJobs queues the render work for the Renderer.
@@ -180,6 +196,11 @@ private:
     // positions, or a point in front of the camera when nothing is selected.
     glm::vec3 selectionPivot();
 
+    // World-space AABB centre across an arbitrary entity set — same logic as
+    // selectionPivot() but parameterised so commands like Group can ask for the
+    // centre of a specific subset of entities rather than the live selection.
+    glm::vec3 entitiesPivot(const std::vector<Entity>& ents);
+
     // Compute one entity's world-space AABB and call Camera::frame() with its
     // centre and bounding-sphere radius. Hierarchy double-click hits this.
     void      frameEntity(Entity e);
@@ -246,12 +267,29 @@ private:
     // Save to the current scene path (or a default); bound to FILE>Save Scene + Ctrl+S.
     void  saveCurrentScene();
 
+    // Switch the engine to a different project. Saves the current project's
+    // scene + prefs, clears all in-memory state (scene, undo history, open
+    // editor tabs, selection), points m_projectPath at newPath, loads the
+    // new project's scene/prefs/undo, and persists the choice in the user's
+    // %APPDATA%\Nyx\last_project.txt so the next launch reopens it.
+    void  switchProject(const std::string& newPath);
+
     // Undo/redo (Ctrl+Z / Ctrl+Shift+Z): snapshot the whole scene before each mutating
     // action; undo restores the most recent snapshot, redo re-applies it. Covers
     // delete/spawn/paste/duplicate/transform-edit/material-assign uniformly.
     void  pushUndo();   // call before a mutating action (clears the redo stack)
     void  undo();
     void  redo();
+
+    // Group the currently-selected entities under a new empty parent entity at
+    // their centroid. Each child's position is re-expressed in the new parent's
+    // space so its world transform is preserved. Bound to Ctrl+G.
+    void  groupSelected();
+
+    // For each "group" entity in the current selection (an empty parent with no
+    // Mesh/Light/Environment), reparent its children to its own parent (or to
+    // root) preserving world transforms, then destroy the now-empty group.
+    void  ungroupSelected();
 
     // Scene serialization (readable line-based .scene). loadScene clears first.
     // Status hook used during scene load to stream per-asset progress to the
@@ -288,8 +326,25 @@ private:
     // changes). Each action gets a file in <projectPath>/scenes/.history/ so undo
     // survives close/reopen.
     struct UndoAction {
-        enum class Kind { Transform, Spawn, Delete, Snapshot, Color, Scalar } kind = Kind::Snapshot;
+        enum class Kind { Transform, Spawn, Delete, Snapshot, Color, Scalar, Group } kind = Kind::Snapshot;
         std::string path;                                          // backing file
+
+        // Kind::Group — delta-style record of "create empty parent + reparent
+        // selected". Undo destroys the group and restores each child's old
+        // parent + local TRS; redo recreates the group and re-applies the
+        // shifts. Only the affected entities are touched (no scene reload).
+        Entity      groupEntity   = NULL_ENTITY;
+        glm::vec3   groupPosition{};                               // world centroid the group was spawned at
+        struct ChildReparent {
+            Entity    entity;
+            Entity    oldParent;
+            glm::vec3 oldPosition;
+            glm::quat oldRotation;
+            glm::vec3 oldScale;
+            Entity    newParent;
+            glm::vec3 newPosition;
+        };
+        std::vector<ChildReparent> childReparents;
 
         // Kind::Transform — entity IDs + old/new TRS for each changed entity.
         struct TRS { Entity e; glm::vec3 pos; glm::quat rot; glm::vec3 scl; };

@@ -111,6 +111,10 @@ public:
     void setVisible(bool v) { m_visible = v; }
     bool isVisible() const { return m_visible; }
 
+    // Engine sets the current selection group each frame so transform scrubs /
+    // text-edits apply to every selected entity, not just the primary one.
+    void setSelectionGroup(const std::vector<Entity>& sel) { m_selectionGroup = sel; }
+
     // Engine sets this each frame so the right-dock resize edge gets a mint
     // highlight strip drawn on the panel's left side while hovered/dragged.
     void setLeftEdgeHighlight(bool h) { m_leftEdgeHighlight = h; }
@@ -130,6 +134,7 @@ private:
     VmaAllocator m_allocator = VK_NULL_HANDLE;
     bool         m_visible   = true;
     bool         m_overButton = false;   // set each update(); see wantsPointerCursor()
+    std::vector<Entity> m_selectionGroup; // refreshed by Engine each frame
     bool         m_leftEdgeHighlight = false;   // mint resize-edge strip
 
     // Current rect + the material slot's screen rect (for hit-testing).
@@ -151,7 +156,10 @@ private:
     // Drag-scrub number fields for Transform: 0..2 = pos xyz, 3..5 = rotation (euler
     // degrees) xyz, 6..8 = scale xyz.
     struct Rect { float x = 0, y = 0, w = 0, h = 0; };
-    Rect   m_fieldRect[9] = {};
+    // Indices 0..8 = pos/rot/scl xyz scrubs; index 9 = uniform-scale field on
+    // the Scl row that multiplies all three components together.
+    Rect   m_fieldRect[10] = {};
+    float  m_fieldValue[10] = {};      // sampled each frame so handleRelease can seed text-edit
     bool   m_hasFields    = false;
     int    m_scrubField   = -1;        // field being dragged, -1 = none
     double m_scrubLastX   = 0.0;
@@ -200,7 +208,7 @@ private:
 
     // Scalar drag-scrub + tonemap 3-button picker. Layout refreshed each frame
     // alongside the section text so they sit beside their numeric values.
-    struct ScalarFieldRect { Rect rect; ScalarField field; };
+    struct ScalarFieldRect { Rect rect; ScalarField field; float value; };
     std::vector<ScalarFieldRect> m_scalarFields;
     bool        m_scalarScrubActive = false;
     ScalarField m_scalarScrubField  = ScalarField::EnvSkyIntensity;

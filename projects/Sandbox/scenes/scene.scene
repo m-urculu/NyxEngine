@@ -1,0 +1,193 @@
+# Nyx scene v1
+entity 0
+env 0.1 0.18 0.45 1 0.55 0.2 0.05 0.04 0.03 0.8 0.15 0.15 0.15 0.6 0.4 0.08 2 0
+entity 1
+light 0 1 1 1 1 -0.431934 -0.863868 -0.259161 10 0 512
+entity 2
+transform 0.0141357 -1.34007 -0.0535828 4.16119e-08 0 0 1 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#0
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_Body_Low1_BaseColor.1002.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_Body_Low1_Normal.1002.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_Body_Low1_OcclusionRoughnessMetallic.1002.jpg
+ssub 0.35
+entity 3
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#1
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Arms_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Arms_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Arms_OcclusionRoughnessMetallic.1001.jpg
+ssub 0.35
+entity 4
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#2
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Arms_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Arms_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Arms_OcclusionRoughnessMetallic.1001.jpg
+ssub 0.35
+entity 5
+transform 0.0304785 -1.3072 -0.0448527 0.707107 0 0 0.707107 0.0146589 0.0146589 0.0146589 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#3
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Arms_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Arms_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Arms_OcclusionRoughnessMetallic.1001.jpg
+ssub 0.35
+entity 6
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#4
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_OcclusionRoughnessMetallic.1001.jpg
+entity 7
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#5
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_OcclusionRoughnessMetallic.1001.jpg
+entity 8
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#6
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_OcclusionRoughnessMetallic.1001.jpg
+entity 9
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#7
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Belt_OcclusionRoughnessMetallic.1001.jpg
+entity 10
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#8
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Cape_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Cape_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Cape_OcclusionRoughnessMetallic.1001.jpg
+entity 11
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#9
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_LowerParts_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_LowerParts_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_LowerParts_OcclusionRoughnessMetallic.1001.jpg
+entity 12
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#10
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_LowerParts_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_LowerParts_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_LowerParts_OcclusionRoughnessMetallic.1001.jpg
+entity 13
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#11
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_LowerParts_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_LowerParts_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_LowerParts_OcclusionRoughnessMetallic.1001.jpg
+entity 14
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#12
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_OcclusionRoughnessMetallic.1001.jpg
+ssub 0.35
+entity 15
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#13
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_OcclusionRoughnessMetallic.1001.jpg
+ssub 0.35
+entity 16
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#14
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_OcclusionRoughnessMetallic.1001.jpg
+ssub 0.35
+entity 17
+transform 0.0026312 -1.37921 -0.0539328 0.707107 0 0 0.707107 0.0153023 0.0153023 0.0153023 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#15
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_OcclusionRoughnessMetallic.1001.jpg
+ssub 0.35
+entity 18
+transform 1.89519e-05 -1.34007 -0.0535828 0.707107 0 0 0.707107 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#16
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Neck_OcclusionRoughnessMetallic.1001.jpg
+ssub 0.35
+entity 19
+transform -1.29268e-06 -2.6457 0.00811397 0.707107 -4.00167e-07 2.35392e-08 0.707107 0.015 0.015 0.015 34
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#17
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Helmet_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Helmet_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_M_Helmet_OcclusionRoughnessMetallic.1001.jpg
+entity 20
+transform 0.0126616 -1.3615 -0.0526927 0 0 0 1 0.0151318 0.0151318 0.0151318 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#18
+material 1 1 1 1 1 1 projects/Sandbox/assets/models/Gladiator/Adawe_Low_Head_Low1_BaseColor.1001.jpg
+nmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_Head_Low1_Normal.1001.jpg
+rmap projects/Sandbox/assets/models/Gladiator/Adawe_Low_Head_Low1_OcclusionRoughnessMetallic.1001.jpg
+ssub 0.35
+entity 21
+transform 0.0107476 -1.34007 -0.0535828 0 0 0 1 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#19
+material 0.2 0.15 0.11 1 0 0.1 -
+entity 22
+transform 1.89519e-05 -1.34007 -0.0535828 0 0 0 1 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#20
+material 0.82 0.79 0.74 1 0 0.35 -
+entity 23
+transform 0.0107472 -1.34007 -0.0535828 0 0 0 1 0.015 0.015 0.015 35
+mesh gltf:projects/Sandbox/assets/models/Gladiator/Gladiator.gltf#21
+material 0.2 0.15 0.11 1 0 0.1 -
+entity 24
+transform 0.0174962 0.108743 0.011464 -0.707107 0 0 0.707107 0.018425 0.018425 0.018425 34
+mesh gltf:projects/Sandbox/assets/models/uploads_files_6840509_SM_Gladiator_HelmetFur.fbx#1
+material 1 1 1 1 0 0.95 projects/Sandbox/assets/models/GeneratedHair_Helmet_BCA.png
+acut 0.25
+entity 25
+transform 0.00228226 0.101813 0.0244641 -0.707107 0 0 0.707107 0.0192573 0.0192573 0.0192573 34
+mesh gltf:projects/Sandbox/assets/models/uploads_files_6840509_SM_Gladiator_HelmetFur.fbx#0
+material 1 1 1 1 0 0.95 projects/Sandbox/assets/models/GeneratedHair_Helmet_BCA.png
+acut 0.25
+entity 26
+transform 0.0139714 -1.43667 -0.0624128 -0.707107 0 0 0.707107 0.0156155 0.0156155 0.0156155 35
+mesh gltf:projects/Sandbox/assets/models/uploads_files_6840509_SM_General_FullFacialHairCards.fbx#0
+material 1 1 1 1 0 0.95 projects/Sandbox/assets/models/GeneratedHair_FacialGroom_BCA.png
+acut 0.25
+entity 27
+transform 0.0137856 -1.49785 -0.0595327 -0.707107 0 0 0.707107 0.0159138 0.0159138 0.0159138 35
+mesh gltf:projects/Sandbox/assets/models/uploads_files_6840509_SM_General_FullFacialHairCards.fbx#1
+material 1 1 1 1 0 0.95 projects/Sandbox/assets/models/GeneratedHair_FacialGroom_BCA.png
+acut 0.25
+entity 28
+transform 0.0124572 -1.25935 -0.0432528 -0.707106 0 0 0.707106 0.0145069 0.0145069 0.0145069 35
+mesh gltf:projects/Sandbox/assets/models/uploads_files_6840509_SM_General_FullFacialHairCards.fbx#2
+material 1 1 1 1 0 0.95 projects/Sandbox/assets/models/GeneratedHair_FacialGroom_BCA.png
+acut 0.25
+entity 29
+transform 0.0091888 -1.53326 -0.0652528 -0.707107 0 0 0.707107 0.0161207 0.0161207 0.0161207 35
+mesh gltf:projects/Sandbox/assets/models/uploads_files_6840509_SM_General_FullFacialHairCards.fbx#3
+material 1 1 1 1 0 0.95 projects/Sandbox/assets/models/GeneratedHair_FacialGroom_BCA.png
+acut 0.25
+entity 30
+transform -0.00483825 -1.27026 -0.0663326 -0.707107 0 0 0.707107 0.014655 0.014655 0.014655 35
+mesh gltf:projects/Sandbox/assets/models/uploads_files_6840509_SM_General_CapeFurHairCards.fbx#0
+material 1 1 1 1 0 0.95 projects/Sandbox/assets/models/GeneratedHair_Cape_BCA.png
+acut 0.25
+entity 31
+transform 0.00892668 -1.12873 -0.0791426 -0.707107 0 0 0.707107 0.0136461 0.0136461 0.0136461 35
+mesh gltf:projects/Sandbox/assets/models/uploads_files_6840509_SM_General_CapeFurHairCards.fbx#1
+material 1 1 1 1 0 0.95 projects/Sandbox/assets/models/GeneratedHair_Cape_BCA.png
+acut 0.25
+entity 32
+transform -0.00115887 -1.539 -0.0654128 -0.707107 0 0 0.707107 0.0169007 0.0169007 0.0169007 35
+mesh gltf:projects/Sandbox/assets/models/uploads_files_6840509_SM_General_BeltFurHairCards.fbx#0
+material 1 1 1 1 0 0.95 projects/Sandbox/assets/models/GeneratedHair_Belt_BCA.png
+acut 0.25
+entity 33
+transform -2.29091 3.71816 1.14043 0 0 0 1 1 1 1 -1
+light 1 1 0.801635 0.492188 15.3 0 -1 0 2.11 0 128
+entity 34
+transform -0.00753888 2.9301 -0.0146806 0 0 0 1 1 1 1 -1
+entity 35
+transform -0.00629255 1.11193 0.0552345 0 0 0 1 1 1 1 -1

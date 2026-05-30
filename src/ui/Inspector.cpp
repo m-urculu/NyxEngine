@@ -62,6 +62,34 @@ glm::vec3 hsvToRgb(float h, float s, float v) {
 }
 // Per-field scrub speed (value/px) and per-field clamp range. Tuned so a small
 // drag tweaks the value at a useful precision and never crosses sensible bounds.
+// Magnitude-aware scrub step. Default (small-magnitude) field stays at the
+// per-field baseline (0.02 units/px for position, etc.); once the value crosses
+// 1000 the step jumps to 1/px (so the last 3 digits of a 4-digit number are the
+// scrubbable range), then to 1000/px above 10k (thousand range), and so on.
+// Without this, dragging a position from 0 to 50000 takes thousands of pixels.
+float scrubStepPerPx(float value, float baseStep) {
+    float mag = std::fabs(value);
+    if (mag >= 1000000.0f) return std::max(baseStep, 100000.0f);
+    if (mag >= 100000.0f)  return std::max(baseStep,  10000.0f);
+    if (mag >= 10000.0f)   return std::max(baseStep,   1000.0f);   // 5-digit → thousand range
+    if (mag >= 1000.0f)    return std::max(baseStep,      1.0f);   // 4-digit → last 3 digits
+    return baseStep;
+}
+
+// Pretty-print a value for the text-edit field: trim trailing zeros and a
+// dangling decimal point so "1.500" → "1.5", "1.000" → "1", "1234.0" → "1234".
+std::string formatEditValue(float v) {
+    char buf[32];
+    if (std::fabs(v) >= 1e6f) { std::snprintf(buf, sizeof(buf), "%g", v); return buf; }
+    std::snprintf(buf, sizeof(buf), "%.4f", v);
+    std::string s(buf);
+    if (s.find('.') != std::string::npos) {
+        while (!s.empty() && s.back() == '0') s.pop_back();
+        if    (!s.empty() && s.back() == '.') s.pop_back();
+    }
+    return s.empty() ? std::string("0") : s;
+}
+
 float scalarSpeed(Inspector::ScalarField f) {
     using SF = Inspector::ScalarField;
     switch (f) {
@@ -191,18 +219,40 @@ void Inspector::update(Registry& reg, Entity selected, bool dragActive,
     if (m_transformCommitPending && m_transformCommitEntity == selected
         && reg.has<TransformComponent>(selected)) {
         if (m_onBeginEdit) m_onBeginEdit();
-        auto& t = reg.get<TransformComponent>(selected);
         const int field = m_transformCommitField;
         const float v   = m_transformCommitValue;
-        if (field < 3) {
-            t.position[field] = v;
-        } else if (field < 6) {
-            int a = field - 3;
-            m_euler[a] = v;
-            t.rotation = glm::quat(glm::radians(m_euler));
-        } else {
-            int a = field - 6;
-            t.scale[a] = std::max(0.01f, v);
+        // Apply to every selected entity (group edit). Text edits use the
+        // typed value absolutely on each — easier to reason about than a
+        // group-delta and matches what most editors do for typed input.
+        std::vector<Entity> targets;
+        targets.reserve(m_selectionGroup.size() + 1);
+        for (Entity e : m_selectionGroup)
+            if (e != NULL_ENTITY && reg.has<TransformComponent>(e)) targets.push_back(e);
+        if (targets.empty()) targets.push_back(selected);
+
+        for (Entity e : targets) {
+            auto& te = reg.get<TransformComponent>(e);
+            if (field < 3) {
+                te.position[field] = v;
+            } else if (field < 6) {
+                int a = field - 3;
+                if (e == selected) {
+                    m_euler[a] = v;
+                    te.rotation = glm::quat(glm::radians(m_euler));
+                } else {
+                    // Other entities: replace their axis-a Euler with v while
+                    // keeping their other-axis rotations as-is.
+                    glm::vec3 eul = glm::degrees(glm::eulerAngles(te.rotation));
+                    eul[a] = v;
+                    te.rotation = glm::quat(glm::radians(eul));
+                }
+            } else if (field < 9) {
+                int a = field - 6;
+                te.scale[a] = std::max(0.01f, v);
+            } else {
+                float s = std::max(0.01f, v);
+                te.scale = glm::vec3(s, s, s);
+            }
         }
         if (m_onEdit)    m_onEdit();
         if (m_onEndEdit) m_onEndEdit();
@@ -377,7 +427,8 @@ void Inspector::update(Registry& reg, Entity selected, bool dragActive,
             m_scalarScrubLastX = mx;
             if (d != 0.0f) {
                 float cur = readScalar(selected, m_scalarScrubField);
-                float nv  = scalarClamp(m_scalarScrubField, cur + d * scalarSpeed(m_scalarScrubField));
+                float nv  = scalarClamp(m_scalarScrubField,
+                                        cur + d * scrubStepPerPx(cur, scalarSpeed(m_scalarScrubField)));
                 if (nv != cur) {
                     if (!m_scalarScrubDirty) {
                         if (m_onBeginScalarEdit) m_onBeginScalarEdit(selected, m_scalarScrubField);
@@ -452,35 +503,63 @@ void Inspector::update(Registry& reg, Entity selected, bool dragActive,
             m_scrubLastX = mx;
             if (d != 0.0f) {
                 if (!m_scrubDirty) { if (m_onBeginEdit) m_onBeginEdit(); m_scrubDirty = true; }  // undo snapshot pre-edit
-                auto& t = reg.get<TransformComponent>(selected);
 
-                // Local-space pivot: the mesh's bbox centre (0 for non-mesh entities).
-                // Rotation/scale rotate the entity around its origin (T*R*S), so we
-                // compensate `position` to keep the world-space pivot fixed — the
-                // visual "rotates in place" without changing the local matrix shape
-                // (which would shift every parent-child relationship in the scene).
-                glm::vec3 c(0.0f);
-                if (reg.has<MeshComponent>(selected)) {
-                    const Mesh* m = reg.get<MeshComponent>(selected).mesh;
-                    if (m) c = (m->boundsMin() + m->boundsMax()) * 0.5f;
+                // Build the list of targets: every selected entity that has a
+                // transform. Falls back to just the primary when nothing else
+                // is in the hierarchy selection.
+                std::vector<Entity> targets;
+                targets.reserve(m_selectionGroup.size() + 1);
+                for (Entity e : m_selectionGroup)
+                    if (e != NULL_ENTITY && reg.has<TransformComponent>(e)) targets.push_back(e);
+                if (targets.empty()) targets.push_back(selected);
+
+                // Rotation scrubs apply the same world-axis delta quaternion
+                // to every target (each rotates about its own origin). Update
+                // m_euler from the primary's pre-rotation so the displayed
+                // value matches what the user is dragging.
+                glm::quat deltaQ{1, 0, 0, 0};
+                int rotAxis = -1;
+                if (m_scrubField >= 3 && m_scrubField < 6) {
+                    rotAxis = m_scrubField - 3;
+                    m_euler[rotAxis] += d * 0.5f;
+                    glm::vec3 worldAxis{0};
+                    worldAxis[rotAxis] = 1.0f;
+                    deltaQ = glm::angleAxis(glm::radians(d * 0.5f), worldAxis);
                 }
 
-                if (m_scrubField < 3) {
-                    t.position[m_scrubField] += d * 0.02f;        // units/px
-                } else if (m_scrubField < 6) {
-                    glm::quat rOld = t.rotation;
-                    glm::vec3 sc   = t.scale;
-                    m_euler[m_scrubField - 3] += d * 0.5f;        // degrees/px
-                    t.rotation = glm::quat(glm::radians(m_euler));
-                    // pos1 = pos0 + Rold*(S*c) - Rnew*(S*c)
-                    glm::vec3 scaled = sc * c;
-                    t.position += rOld * scaled - t.rotation * scaled;
-                } else {
-                    int a = m_scrubField - 6;
-                    glm::vec3 sOld = t.scale;
-                    t.scale[a] = std::max(0.01f, t.scale[a] + d * 0.01f);
-                    // pos1 = pos0 + R*(Sold*c - Snew*c)
-                    t.position += t.rotation * ((sOld - t.scale) * c);
+                for (Entity e : targets) {
+                    auto& t = reg.get<TransformComponent>(e);
+                    // Local-space pivot: the entity's own bbox centre.
+                    glm::vec3 c(0.0f);
+                    if (reg.has<MeshComponent>(e)) {
+                        const Mesh* m = reg.get<MeshComponent>(e).mesh;
+                        if (m) c = (m->boundsMin() + m->boundsMax()) * 0.5f;
+                    }
+
+                    if (m_scrubField < 3) {
+                        // Step scales with magnitude so big positions don't take a
+                        // marathon drag to cross.
+                        t.position[m_scrubField] += d * scrubStepPerPx(t.position[m_scrubField], 0.02f);
+                    } else if (m_scrubField < 6) {
+                        glm::quat rOld = t.rotation;
+                        t.rotation     = deltaQ * t.rotation;
+                        glm::vec3 scaled = t.scale * c;
+                        t.position += rOld * scaled - t.rotation * scaled;
+                    } else if (m_scrubField < 9) {
+                        int a = m_scrubField - 6;
+                        glm::vec3 sOld = t.scale;
+                        t.scale[a] = std::max(0.01f, t.scale[a] + d * 0.01f);
+                        t.position += t.rotation * ((sOld - t.scale) * c);
+                    } else {
+                        glm::vec3 sOld = t.scale;
+                        float mult = 1.0f + d * 0.005f;
+                        if (mult < 0.01f) mult = 0.01f;
+                        t.scale = glm::vec3(
+                            std::max(0.01f, t.scale.x * mult),
+                            std::max(0.01f, t.scale.y * mult),
+                            std::max(0.01f, t.scale.z * mult));
+                        t.position += t.rotation * ((sOld - t.scale) * c);
+                    }
                 }
                 if (m_onEdit) m_onEdit();   // mark scene dirty so auto-save catches the new value
             }
@@ -499,7 +578,7 @@ void Inspector::update(Registry& reg, Entity selected, bool dragActive,
         const float fx = px + lw;
         const float fw = (x0 + width - 8.0f) - fx;
         addText(px, y + 2.0f, label, fsz, keyCol, maxX);
-        m_scalarFields.push_back({{fx, y, fw, fh}, field});
+        m_scalarFields.push_back({{fx, y, fw, fh}, field, value});
         bool hov     = cursorActive && mx >= fx && mx < fx + fw && my >= y && my < y + fh;
         bool active  = m_scalarScrubActive && m_scalarScrubField == field;
         bool editing = m_textEditActive    && m_textEditField    == field;
@@ -589,7 +668,8 @@ void Inspector::update(Registry& reg, Entity selected, bool dragActive,
             for (int a = 0; a < 3; ++a) {
                 float fx  = fx0 + a * (fw + 2.0f);
                 int   idx = baseIdx + a;
-                m_fieldRect[idx] = {fx, y, fw, fh};
+                m_fieldRect[idx]  = {fx, y, fw, fh};
+                m_fieldValue[idx] = v[a];
                 if (cursorActive && mx >= fx && mx < fx + fw && my >= y && my < y + fh)
                     m_overButton = true;   // scrubbable transform field — pointer cursor
                 bool editing = m_textEditActive && m_textEditTransformField == idx;
@@ -613,7 +693,47 @@ void Inspector::update(Registry& reg, Entity selected, bool dragActive,
                                && reg.get<LightComponent>(selected).type == LightComponent::Type::Point;
         if (!isPointLight) {
             fieldRow("Rot", m_euler, 3);
-            fieldRow("Scl", tc.scale, 6);
+            // Scl row gets four fields instead of three: x / y / z and a
+            // uniform-scale field that multiplies all three together. Useful
+            // for resizing imported models without breaking xyz ratios.
+            const float scfw  = std::floor((availW - 6.0f) / 4.0f);   // 4 fields, 3 × 2px gaps
+            addText(px, y + 2.0f, "Scl", fsz, keyCol, maxX);
+            for (int a = 0; a < 3; ++a) {
+                float fx  = fx0 + a * (scfw + 2.0f);
+                int   idx = 6 + a;
+                m_fieldRect[idx]  = {fx, y, scfw, fh};
+                m_fieldValue[idx] = tc.scale[a];
+                if (cursorActive && mx >= fx && mx < fx + scfw && my >= y && my < y + fh)
+                    m_overButton = true;
+                bool editing = m_textEditActive && m_textEditTransformField == idx;
+                addQuad(fx, y, scfw, fh, (m_scrubField == idx || editing) ? fieldActive : fieldBg);
+                addOutline(fx, y, scfw, fh, 1.0f, editing ? mint : slotBorder);
+                if (editing) {
+                    std::string display = m_textEditBuffer + "_";
+                    addText(fx + 3.0f, y + 2.0f, display, fsz, valCol, fx + scfw - 2.0f);
+                } else {
+                    addText(fx + 3.0f, y + 2.0f, fnum(tc.scale[a]), fsz, valCol, fx + scfw - 2.0f);
+                }
+            }
+            // Uniform-scale field — index 9. Display = average so non-uniform
+            // scales still read sensibly; drag scrubs multiplicatively (keeps
+            // xyz ratios); typing sets all three components to that value.
+            float ufx     = fx0 + 3 * (scfw + 2.0f);
+            m_fieldRect[9]  = {ufx, y, scfw, fh};
+            m_fieldValue[9] = (tc.scale.x + tc.scale.y + tc.scale.z) / 3.0f;
+            if (cursorActive && mx >= ufx && mx < ufx + scfw && my >= y && my < y + fh)
+                m_overButton = true;
+            bool uEditing = m_textEditActive && m_textEditTransformField == 9;
+            addQuad(ufx, y, scfw, fh, (m_scrubField == 9 || uEditing) ? fieldActive : fieldBg);
+            addOutline(ufx, y, scfw, fh, 1.0f, uEditing ? mint : slotBorder);
+            if (uEditing) {
+                std::string display = m_textEditBuffer + "_";
+                addText(ufx + 3.0f, y + 2.0f, display, fsz, valCol, ufx + scfw - 2.0f);
+            } else {
+                float avg = (tc.scale.x + tc.scale.y + tc.scale.z) / 3.0f;
+                addText(ufx + 3.0f, y + 2.0f, fnum(avg), fsz, valCol, ufx + scfw - 2.0f);
+            }
+            y += fh + 3.0f;
         }
         m_hasFields = true;
     }
@@ -977,7 +1097,7 @@ bool Inspector::handleMouseButton(int button, int action) {
 
     // Begin a transform drag-scrub if a number field was pressed.
     if (m_hasFields) {
-        for (int i = 0; i < 9; ++i) {
+        for (int i = 0; i < 10; ++i) {
             const Rect& r = m_fieldRect[i];
             if (mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h) {
                 m_scrubField = i; m_scrubLastX = mx; m_scrubDirty = false;
@@ -1016,7 +1136,9 @@ void Inspector::handleRelease() {
         }
 
         // Click-without-drag on a transform field → enter text-edit mode for
-        // that field. Same threshold as the scalar fields.
+        // that field. Same threshold as the scalar fields. Buffer is pre-filled
+        // with the current value (formatted) so the user can edit the digits
+        // they want instead of retyping from scratch.
         if (!didScrub) {
             double mx = 0.0, my = 0.0;
             glfwGetCursorPos(m_window, &mx, &my);
@@ -1025,7 +1147,9 @@ void Inspector::handleRelease() {
                 m_textEditActive          = true;
                 m_textEditTransformField  = field;
                 m_textEditTransformEntity = entity;
-                m_textEditBuffer.clear();
+                // Seed the buffer with the value sampled last update() so the
+                // user edits the digits instead of typing from scratch.
+                m_textEditBuffer = formatEditValue(m_fieldValue[field]);
             }
         }
     }
@@ -1059,7 +1183,12 @@ void Inspector::handleRelease() {
                 m_textEditActive = true;
                 m_textEditField  = field;
                 m_textEditEntity = entity;
-                m_textEditBuffer.clear();
+                // Seed buffer with the value rendered this frame so the user
+                // can edit instead of retyping.
+                float seed = 0.0f;
+                for (const auto& sf : m_scalarFields)
+                    if (sf.field == field) { seed = sf.value; break; }
+                m_textEditBuffer = formatEditValue(seed);
             }
         }
     }
