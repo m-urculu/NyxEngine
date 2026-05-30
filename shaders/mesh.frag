@@ -184,7 +184,11 @@ void main() {
 
     vec3 N = applyNormalMap(normalize(fragNormal));
     vec3 V = normalize(ubo.cameraPosition.xyz - fragWorldPos);
-    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    // Dielectric base reflectance is 0.04; skin sits a touch lower (~0.028), which
+    // takes the edge off the uniform "coated plastic" sheen. Only shift it for
+    // subsurface materials so metals/other dielectrics are untouched.
+    float dielectricF0 = (material.subsurface > 0.0) ? 0.028 : 0.04;
+    vec3 F0 = mix(vec3(dielectricF0), albedo, metallic);
 
     vec3 Lo = vec3(0.0);
     int lightCount = ubo.lightCountAndPad.x;
@@ -259,6 +263,16 @@ void main() {
     vec3  diffIBL   = fragDiffIBL;
     vec3  specIBL   = mix(sampleSky(R), diffIBL, roughness * roughness);
     vec3  Frough    = F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(1.0 - NdotV, 5.0);
+    // Skin tweaks (gated on subsurface so non-skin materials are unchanged):
+    //  - Specular occlusion (Lagarde/Frostbite): dim the ambient sky reflection in
+    //    creases/cavities using AO, so the sheen stops sitting uniformly everywhere.
+    //  - Tame the grazing-angle skylight rim (the Fresnel term that reads "plastic"
+    //    on a smooth analytic sky) by pulling it down as subsurface rises.
+    if (material.subsurface > 0.0) {
+        float specOcc = clamp(pow(NdotV + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
+        specIBL *= specOcc;
+        Frough  *= mix(1.0, 0.5, clamp(material.subsurface, 0.0, 1.0));
+    }
     vec3  kDamb     = (vec3(1.0) - Frough) * (1.0 - metallic);
     vec3  ambient   = (kDamb * diffIBL * albedo + Frough * specIBL) * ao;
 
