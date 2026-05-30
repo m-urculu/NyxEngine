@@ -274,6 +274,11 @@ private:
     // %APPDATA%\Nyx\last_project.txt so the next launch reopens it.
     void  switchProject(const std::string& newPath);
 
+    // "Save As" → copy the entire current project (scenes + assets + prefs) into
+    // a new sibling folder the user picks, then switch to it. Saves the current
+    // project first so the copy is up to date.
+    void  saveProjectAs();
+
     // Undo/redo (Ctrl+Z / Ctrl+Shift+Z): snapshot the whole scene before each mutating
     // action; undo restores the most recent snapshot, redo re-applies it. Covers
     // delete/spawn/paste/duplicate/transform-edit/material-assign uniformly.

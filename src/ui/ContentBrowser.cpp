@@ -344,15 +344,21 @@ void ContentBrowser::doAction(int action, const std::string& arg) {
             fs::create_directories(np + "/assets",  ec);
             fs::create_directories(np + "/scenes",  ec);
             fs::create_directories(np + "/procgen", ec);
-            setProject(np);
+            // Engine handles the full switch: save current, clear, load new.
+            if (m_onSwitchProject) m_onSwitchProject(np);
+            else                   setProject(np);   // fallback: browser-only
             break;
         }
         case A_OPENPROJECT:   if (m_onFileMenu) m_onFileMenu("openproject"); break;  // engine opens a folder dialog
-        case A_SWITCHPROJECT: if (!arg.empty()) setProject(arg); break;
-        case A_SAVE:      if (m_onFileMenu) m_onFileMenu("save");      break;
-        case A_SAVEALL:   if (m_onFileMenu) m_onFileMenu("saveall");   break;
-        case A_SAVESCENE: if (m_onFileMenu) m_onFileMenu("savescene"); break;
-        case A_EXIT:      if (m_onFileMenu) m_onFileMenu("exit");      break;
+        case A_SWITCHPROJECT:
+            if (!arg.empty()) {
+                if (m_onSwitchProject) m_onSwitchProject(arg);
+                else                   setProject(arg);
+            }
+            break;
+        case A_SAVE:      if (m_onFileMenu) m_onFileMenu("save");   break;
+        case A_SAVEAS:    if (m_onFileMenu) m_onFileMenu("saveas"); break;
+        case A_EXIT:      if (m_onFileMenu) m_onFileMenu("exit");   break;
     }
 }
 
@@ -362,8 +368,7 @@ void ContentBrowser::openFileMenu(float x, float y) {
     m_menuItems.push_back({"New Project",  A_NEWPROJECT});
     m_menuItems.push_back({"Open Project", A_OPENPROJECT});
     m_menuItems.push_back({"Save",         A_SAVE});
-    m_menuItems.push_back({"Save All",     A_SAVEALL});
-    m_menuItems.push_back({"Save Scene",   A_SAVESCENE});
+    m_menuItems.push_back({"Save As...",   A_SAVEAS});
     m_menuItems.push_back({"Refresh",      A_REFRESH});
     m_menuItems.push_back({"Exit",         A_EXIT});
     size_t longest = 0; for (const auto& it : m_menuItems) longest = std::max(longest, it.label.size());
@@ -584,6 +589,16 @@ void ContentBrowser::collectExpanded(const Node& n, std::set<std::string>& out) 
 void ContentBrowser::applyExpanded(Node& n, const std::set<std::string>& exp) {
     if (n.isDir) n.expanded = exp.count(n.path) > 0;
     for (Node& c : n.children) applyExpanded(c, exp);
+}
+
+std::set<std::string> ContentBrowser::expandedFolders() const {
+    std::set<std::string> out;
+    collectExpanded(m_root, out);
+    return out;
+}
+
+void ContentBrowser::setExpandedFolders(const std::set<std::string>& exp) {
+    applyExpanded(m_root, exp);
 }
 
 void ContentBrowser::refresh() {

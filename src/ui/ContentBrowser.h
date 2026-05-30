@@ -25,7 +25,7 @@ public:
     static constexpr float MIN_WIDTH       = 150.0f;
     static constexpr float MAX_WIDTH       = 480.0f;
     static constexpr float COLLAPSED_WIDTH = 18.0f;  // thin rail width when collapsed
-    static constexpr float TOP_OFFSET      = 32.0f;  // sits below the title bar (BAR_HEIGHT)
+    static constexpr float TOP_OFFSET      = 0.0f;   // OS draws the title bar; content browser sits at y=0
     static constexpr float HEADER_H        = 22.0f;  // header band height
     static constexpr float ROW_H           = 12.0f;  // tree row height
     static constexpr float LIST_TOP        = TOP_OFFSET + HEADER_H; // content top (header covers overflow)
@@ -61,8 +61,12 @@ public:
     // Invoked with a path that was removed (deleted) so the editor can close its tab.
     void setPathRemovedCallback(std::function<void(const std::string&)> cb) { m_onPathRemoved = std::move(cb); }
 
-    // Invoked for File-menu actions the engine owns: "save" / "saveall" / "exit" / "openproject".
+    // Invoked for File-menu actions the engine owns: "save" / "saveas" / "exit" / "openproject".
     void setFileMenuCallback(std::function<void(const std::string&)> cb) { m_onFileMenu = std::move(cb); }
+
+    // Invoked when the user asks to switch projects (New Project, Switch
+    // Project) — the engine handles the save-current/clear/load-new flow.
+    void setSwitchProjectCallback(std::function<void(const std::string&)> cb) { m_onSwitchProject = std::move(cb); }
 
     // Switch the browsed project root (e.g. after the engine's Open-folder dialog).
     void setProject(const std::string& path);
@@ -85,6 +89,12 @@ public:
     float panelWidth() const { return m_width; }
     void  setExpanded(bool v) { m_expanded = v; }
     void  setPanelWidth(float w) { m_width = w; }
+
+    // Folder expand-state persistence. Engine writes the set of currently-
+    // open folder paths into editor.prefs at shutdown and re-applies them at
+    // startup so the tree looks the same after a relaunch.
+    std::set<std::string> expandedFolders() const;
+    void setExpandedFolders(const std::set<std::string>& exp);
 
     // Invoked with the file path when a file row is clicked.
     void setFileOpenCallback(std::function<void(const std::string&)> cb) { m_onFileOpen = std::move(cb); }
@@ -140,7 +150,7 @@ private:
     // ── Context menu ─────────────────────────────────────────────────────────
     static constexpr float MENU_ROW_H = 16.0f;
     enum Action { A_OPEN, A_NEWFOLDER, A_NEWFILE, A_NEWMATERIAL, A_CUT, A_COPY, A_PASTE, A_RENAME, A_DELETE, A_REFRESH,
-                  A_NEWPROJECT, A_OPENPROJECT, A_SWITCHPROJECT, A_SAVE, A_SAVEALL, A_SAVESCENE, A_EXIT };
+                  A_NEWPROJECT, A_OPENPROJECT, A_SWITCHPROJECT, A_SAVE, A_SAVEAS, A_EXIT };
     struct MenuItem { std::string label; int action; std::string arg; };
     static constexpr float FILE_BTN_W   = 36.0f;   // "FILE" header button width (6 px pad each side)
     static constexpr float TOOL_BTN_W   = 18.0f;   // new-file / new-folder header buttons
@@ -158,7 +168,8 @@ private:
     std::string m_selectedPath;        // last-clicked row; target for keyboard ops
     bool        m_focused = false;      // file tree has keyboard focus (Ctrl shortcuts)
     std::function<void(const std::string&)> m_onPathRemoved;  // -> editor closes the tab
-    std::function<void(const std::string&)> m_onFileMenu;     // -> engine (save/saveall/exit)
+    std::function<void(const std::string&)> m_onFileMenu;     // -> engine (save/saveas/exit)
+    std::function<void(const std::string&)> m_onSwitchProject;// -> engine (full project switch flow)
     std::function<void(const std::string&, double, double)> m_onExternalDrop; // -> drop outside panel
 
     // ── Cut / copy clipboard ─────────────────────────────────────────────────

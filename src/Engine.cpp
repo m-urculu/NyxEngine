@@ -382,9 +382,12 @@ void Engine::init(StatusFn onStatus) {
     });
     // File-menu (project) actions the engine owns.
     m_contentBrowser.setFileMenuCallback([this](const std::string& action) {
-        if      (action == "save")    m_editor.save();
-        else if (action == "saveall") m_editor.saveAll();
-        else if (action == "savescene") saveCurrentScene();
+        if      (action == "save") {
+            // One "Save" now saves everything: all open text tabs + the scene.
+            m_editor.saveAll();
+            saveCurrentScene();
+        }
+        else if (action == "saveas")  saveProjectAs();
         else if (action == "exit")    glfwSetWindowShouldClose(m_window->getHandle(), GLFW_TRUE);
         else if (action == "openproject") {
             // Steer the picker to the engine's projects/ root (parent of the
@@ -3292,6 +3295,60 @@ void Engine::switchProject(const std::string& newPath) {
 
     m_statusFn = nullptr;
     splash.close();
+}
+
+void Engine::saveProjectAs() {
+    namespace fs = std::filesystem;
+
+    // Flush the current project to disk first so the copy is current.
+    m_editor.saveAll();
+    saveCurrentScene();
+    saveEditorPrefs();
+
+    // Ask where to put the copy. The user picks a PARENT folder; we create a new
+    // subfolder named after the current project inside it. Steer the picker to the
+    // engine's projects/ root so siblings are the obvious destination.
+    fs::path curr   = fs::path(m_projectPath);
+    std::string projName = curr.filename().string();
+    if (projName.empty()) projName = "Project";
+    fs::path parentOfCurr = curr.parent_path();
+    std::string startDir = parentOfCurr.empty() ? std::string("projects")
+                                                : parentOfCurr.generic_string();
+    std::string destParent = m_window->openFolderDialog(
+        "Save Project As — pick a destination folder", startDir);
+    if (destParent.empty()) return;   // cancelled
+
+    // Choose a non-colliding destination: <destParent>/<projName>, then append
+    // " Copy", " Copy 2", … if something is already there. Never overwrite.
+    fs::path dest = fs::path(destParent) / projName;
+    if (fs::exists(dest)) {
+        dest = fs::path(destParent) / (projName + " Copy");
+        for (int n = 2; fs::exists(dest); ++n)
+            dest = fs::path(destParent) / (projName + " Copy " + std::to_string(n));
+    }
+    // Guard against copying a project into itself (dest under source).
+    {
+        std::error_code ec;
+        fs::path s = fs::weakly_canonical(curr, ec);
+        fs::path d = fs::weakly_canonical(dest, ec);
+        std::string ss = s.generic_string(), ds = d.generic_string();
+        if (!ss.empty() && ds.rfind(ss + "/", 0) == 0) {
+            LOG_ERROR("Save As: destination '{}' is inside the source project — aborting", ds);
+            return;
+        }
+    }
+
+    std::error_code ec;
+    fs::copy(curr, dest, fs::copy_options::recursive, ec);
+    if (ec) {
+        LOG_ERROR("Save As: copy '{}' -> '{}' failed: {}",
+                  curr.generic_string(), dest.generic_string(), ec.message());
+        return;
+    }
+    LOG_INFO("Save As: copied project to {}", dest.generic_string());
+
+    // Switch to the copy so the user is now editing it (matches Open Project UX).
+    switchProject(dest.generic_string());
 }
 
 void Engine::saveCurrentScene() {
