@@ -101,7 +101,9 @@ float scalarSpeed(Inspector::ScalarField f) {
         case SF::LightIntensity:    return 0.05f;
         case SF::LightRadius:       return 0.1f;
         case SF::LightShadowResolution: return 8.0f;   // ~32 px to step a tier
-        case SF::MaterialSubsurface:    return 0.004f;  // 0..1 over a comfortable drag
+        case SF::MaterialSubsurface:
+        case SF::MaterialMetallic:
+        case SF::MaterialRoughness:     return 0.004f;  // 0..1 over a comfortable drag
         default: return 0.01f;
     }
 }
@@ -122,7 +124,9 @@ float scalarClamp(Inspector::ScalarField f, float v) {
         }
         case SF::EnvBloomKnee:
         case SF::EnvBloomStrength:
-        case SF::MaterialSubsurface: return std::min(1.0f, std::max(0.0f, v));
+        case SF::MaterialSubsurface:
+        case SF::MaterialMetallic:
+        case SF::MaterialRoughness:  return std::min(1.0f, std::max(0.0f, v));
         case SF::EnvExposure:       return std::min(10.0f, std::max(-10.0f, v));
         default: return v;
     }
@@ -366,6 +370,12 @@ void Inspector::update(Registry& reg, Entity selected, bool dragActive,
                 // m_onEdit (the per-material UBO is GPU-only, not per-frame).
                 if (reg.has<MaterialComponent>(e)) reg.get<MaterialComponent>(e).subsurface = val;
                 return;
+            case ScalarField::MaterialMetallic:
+                if (reg.has<MaterialComponent>(e)) reg.get<MaterialComponent>(e).metallic = val;
+                return;
+            case ScalarField::MaterialRoughness:
+                if (reg.has<MaterialComponent>(e)) reg.get<MaterialComponent>(e).roughness = val;
+                return;
             default: break;
         }
         if (!reg.has<EnvironmentComponent>(e)) return;
@@ -396,6 +406,10 @@ void Inspector::update(Registry& reg, Entity selected, bool dragActive,
                 return reg.has<LightComponent>(e) ? (float)reg.get<LightComponent>(e).shadowResolution : 512.0f;
             case ScalarField::MaterialSubsurface:
                 return reg.has<MaterialComponent>(e) ? reg.get<MaterialComponent>(e).subsurface : 0.0f;
+            case ScalarField::MaterialMetallic:
+                return reg.has<MaterialComponent>(e) ? reg.get<MaterialComponent>(e).metallic : 0.0f;
+            case ScalarField::MaterialRoughness:
+                return reg.has<MaterialComponent>(e) ? reg.get<MaterialComponent>(e).roughness : 0.0f;
             default: break;
         }
         if (!reg.has<EnvironmentComponent>(e)) return 0.0f;
@@ -757,9 +771,10 @@ void Inspector::update(Registry& reg, Entity selected, bool dragActive,
                     glm::vec3(mat.baseColorFactor.r, mat.baseColorFactor.g, mat.baseColorFactor.b),
                     PickerField::MaterialBase);
 
-        line("Metallic   " + fnum(mat.metallic),  keyCol);
-        line("Roughness  " + fnum(mat.roughness), keyCol);
-        // Subsurface is editable (skin/wax look); scrub or click-to-type 0..1.
+        // Metallic / Roughness / Subsurface are all editable 0..1 (scrub or
+        // click-to-type). Each routes through reuploadMaterialParams on edit.
+        scalarRow("Metallic",   mat.metallic,   ScalarField::MaterialMetallic);
+        scalarRow("Roughness",  mat.roughness,  ScalarField::MaterialRoughness);
         scalarRow("Subsurface", mat.subsurface, ScalarField::MaterialSubsurface);
         line("Albedo: " + (mat.albedoName.empty() ? std::string("(default)") : mat.albedoName), keyCol);
         y += 4.0f;

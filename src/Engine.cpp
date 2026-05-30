@@ -465,10 +465,13 @@ void Engine::init(StatusFn onStatus) {
     });
     m_inspector.setOnEditCallback([this]() {
         m_sceneDirty = true;
-        // A live material-scalar edit (subsurface) mutated only the CPU component;
-        // push it to the GPU material UBO now so the change shows this frame.
+        // A live material-scalar edit (subsurface / metallic / roughness) mutated
+        // only the CPU component; push it to the GPU material UBO now so the change
+        // shows this frame (the per-material UBO is GPU-only, not per-frame).
         if (m_pendingScalarActive
-            && m_pendingScalarTarget == Inspector::ScalarField::MaterialSubsurface)
+            && (m_pendingScalarTarget == Inspector::ScalarField::MaterialSubsurface
+             || m_pendingScalarTarget == Inspector::ScalarField::MaterialMetallic
+             || m_pendingScalarTarget == Inspector::ScalarField::MaterialRoughness))
             reuploadMaterialParams(m_pendingScalarEntity);
     });
     m_inspector.setEndEditCallback([this]() { endTransformUndo(); });
@@ -2834,6 +2837,10 @@ float Engine::readScalarTarget(Entity e, Inspector::ScalarField t) const {
             return m_registry.has<LightComponent>(e) ? (float)m_registry.get<LightComponent>(e).shadowResolution : 512.0f;
         case SF::MaterialSubsurface:
             return m_registry.has<MaterialComponent>(e) ? m_registry.get<MaterialComponent>(e).subsurface : 0.0f;
+        case SF::MaterialMetallic:
+            return m_registry.has<MaterialComponent>(e) ? m_registry.get<MaterialComponent>(e).metallic : 0.0f;
+        case SF::MaterialRoughness:
+            return m_registry.has<MaterialComponent>(e) ? m_registry.get<MaterialComponent>(e).roughness : 0.0f;
         default: break;
     }
     if (!m_registry.has<EnvironmentComponent>(e)) return 0.0f;
@@ -2872,6 +2879,18 @@ void Engine::writeScalarTarget(Entity e, Inspector::ScalarField t, float v) {
             if (m_registry.has<MaterialComponent>(e)) {
                 m_registry.get<MaterialComponent>(e).subsurface = v;
                 // Undo/redo and any direct write must reach the GPU material UBO.
+                reuploadMaterialParams(e);
+            }
+            return;
+        case SF::MaterialMetallic:
+            if (m_registry.has<MaterialComponent>(e)) {
+                m_registry.get<MaterialComponent>(e).metallic = v;
+                reuploadMaterialParams(e);
+            }
+            return;
+        case SF::MaterialRoughness:
+            if (m_registry.has<MaterialComponent>(e)) {
+                m_registry.get<MaterialComponent>(e).roughness = v;
                 reuploadMaterialParams(e);
             }
             return;

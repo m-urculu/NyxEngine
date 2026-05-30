@@ -45,6 +45,8 @@ public:
         LightCastsShadows,        // bool stored as 0/1
         LightShadowResolution,    // snapped to power-of-2 in 128..2048
         MaterialSubsurface,       // 0..1; reuploads the material UBO on change
+        MaterialMetallic,         // 0..1; reuploads the material UBO on change
+        MaterialRoughness,        // 0..1; reuploads the material UBO on change
     };
 
     static constexpr float HEADER_H = 20.0f;
