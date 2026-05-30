@@ -76,6 +76,15 @@ public:
                                         bool hostVisible = false,
                                         Buffer** outUBO = nullptr);
 
+    // Re-upload a material's params into its existing GPU-only UBO (the Buffer*
+    // handed back via allocateMaterialSet's outUBO). Used for live inspector
+    // edits of material scalars (e.g. subsurface) without reallocating the whole
+    // descriptor set. Goes through a staging buffer → GPU_ONLY copy, same as the
+    // initial upload (avoids the GTX 960 once-written CPU_TO_GPU stale read).
+    // Caller must ensure the UBO isn't in flight (waitIdle) before calling.
+    void reuploadMaterialParams(VulkanContext& context, Buffer* ubo,
+                                const MaterialParams& params);
+
     // Free ALL material sets + their UBOs (resets the material pool). Used when a
     // scene is cleared/reloaded so descriptors don't leak. Caller must vkDeviceWaitIdle
     // first — any set still referenced by an in-flight command buffer becomes invalid.

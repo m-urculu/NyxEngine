@@ -416,6 +416,11 @@ private:
     float readScalarTarget (Entity e, Inspector::ScalarField t) const;
     void  writeScalarTarget(Entity e, Inspector::ScalarField t, float v);
 
+    // Re-upload an entity's MaterialComponent params into its existing GPU-only
+    // material UBO. Used after a live inspector edit of a material scalar
+    // (subsurface) since that UBO is written via staging, not per frame.
+    void  reuploadMaterialParams(Entity e);
+
     void pushSpawnAction(const std::vector<Entity>& created);      // call after entities are spawned
     void pushDeleteAction(const std::vector<Entity>& toDelete);    // call BEFORE the entities are destroyed
 };

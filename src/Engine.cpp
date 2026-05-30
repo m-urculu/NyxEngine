@@ -463,7 +463,14 @@ void Engine::init(StatusFn onStatus) {
         if (sel.empty() && m_selectedEntity != NULL_ENTITY) sel.push_back(m_selectedEntity);
         beginTransformUndo(sel);
     });
-    m_inspector.setOnEditCallback([this]() { m_sceneDirty = true; });
+    m_inspector.setOnEditCallback([this]() {
+        m_sceneDirty = true;
+        // A live material-scalar edit (subsurface) mutated only the CPU component;
+        // push it to the GPU material UBO now so the change shows this frame.
+        if (m_pendingScalarActive
+            && m_pendingScalarTarget == Inspector::ScalarField::MaterialSubsurface)
+            reuploadMaterialParams(m_pendingScalarEntity);
+    });
     m_inspector.setEndEditCallback([this]() { endTransformUndo(); });
     // Color edits get a per-field delta: begin captures (entity, target,
     // pre-edit color), end captures the post-edit color and pushes a single
@@ -1273,7 +1280,10 @@ Entity Engine::createMeshEntity(Mesh* mesh, Texture* texture,
     mat.albedoPath = albedoPath;
     mat.albedoName = albedoPath.empty() ? "" : std::filesystem::path(albedoPath).filename().string();
     mat.alphaCutoff = alphaCutoff;
-    mat.descriptorSet = m_descriptors.allocateMaterialSet(m_vulkanContext, maps, params);
+    // Capture the UBO Buffer* so inspector edits (subsurface) can re-upload params
+    // to the existing GPU-only buffer without rebuilding the descriptor set.
+    mat.descriptorSet = m_descriptors.allocateMaterialSet(m_vulkanContext, maps, params,
+                                                          /*hostVisible=*/false, &mat.materialUBO);
     m_registry.assign<MaterialComponent>(e, mat);
 
     return e;
@@ -2241,7 +2251,8 @@ std::vector<Entity> Engine::readEntities(std::istream& is, const glm::vec3& posO
         mat.normalPath      = nrmTex ? pend.normal     : "";
         mat.metalRoughPath  = mrTex  ? pend.metalrough : "";
         mat.occlusionPath   = aoTex  ? pend.occlusion  : "";
-        mat.descriptorSet   = m_descriptors.allocateMaterialSet(m_vulkanContext, maps, params);
+        mat.descriptorSet   = m_descriptors.allocateMaterialSet(m_vulkanContext, maps, params,
+                                                                /*hostVisible=*/false, &mat.materialUBO);
         m_registry.assign<MaterialComponent>(pendEntity, mat);
         pend = PendingMat{};
         pendEntity = NULL_ENTITY;
@@ -2821,6 +2832,8 @@ float Engine::readScalarTarget(Entity e, Inspector::ScalarField t) const {
             return (m_registry.has<LightComponent>(e) && m_registry.get<LightComponent>(e).castsShadows) ? 1.0f : 0.0f;
         case SF::LightShadowResolution:
             return m_registry.has<LightComponent>(e) ? (float)m_registry.get<LightComponent>(e).shadowResolution : 512.0f;
+        case SF::MaterialSubsurface:
+            return m_registry.has<MaterialComponent>(e) ? m_registry.get<MaterialComponent>(e).subsurface : 0.0f;
         default: break;
     }
     if (!m_registry.has<EnvironmentComponent>(e)) return 0.0f;
@@ -2855,6 +2868,13 @@ void Engine::writeScalarTarget(Entity e, Inspector::ScalarField t, float v) {
             if (m_registry.has<LightComponent>(e))
                 m_registry.get<LightComponent>(e).shadowResolution = (int)std::round(v);
             return;
+        case SF::MaterialSubsurface:
+            if (m_registry.has<MaterialComponent>(e)) {
+                m_registry.get<MaterialComponent>(e).subsurface = v;
+                // Undo/redo and any direct write must reach the GPU material UBO.
+                reuploadMaterialParams(e);
+            }
+            return;
         default: break;
     }
     if (!m_registry.has<EnvironmentComponent>(e)) return;
@@ -2872,6 +2892,26 @@ void Engine::writeScalarTarget(Entity e, Inspector::ScalarField t, float v) {
         }
         default: break;
     }
+}
+
+void Engine::reuploadMaterialParams(Entity e) {
+    if (e == NULL_ENTITY || !m_registry.has<MaterialComponent>(e)) return;
+    auto& mat = m_registry.get<MaterialComponent>(e);
+    if (!mat.materialUBO) return;   // no captured UBO (e.g. legacy/gizmo material)
+    // Rebuild the full param block from the component. The map-presence flags are
+    // derived from the stored paths (the canonical source, same as flushMat).
+    MaterialParams params{};
+    params.baseColorFactor  = mat.baseColorFactor;
+    params.metallic         = mat.metallic;
+    params.roughness        = mat.roughness;
+    params.hasNormalMap     = mat.normalPath.empty()     ? 0.0f : 1.0f;
+    params.hasMetalRoughMap = mat.metalRoughPath.empty() ? 0.0f : 1.0f;
+    params.alphaCutoff      = mat.alphaCutoff;
+    params.subsurface       = mat.subsurface;
+    // The UBO may be referenced by an in-flight command buffer; wait before the
+    // staging copy overwrites it (same discipline as assignMaterialToSelected).
+    m_renderer.waitIdle(m_vulkanContext.getDevice());
+    m_descriptors.reuploadMaterialParams(m_vulkanContext, mat.materialUBO, params);
 }
 
 void Engine::beginScalarUndo(Entity e, Inspector::ScalarField t) {

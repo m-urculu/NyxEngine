@@ -179,6 +179,20 @@ void Descriptors::createPool(VkDevice device) {
     }
 }
 
+void Descriptors::reuploadMaterialParams(VulkanContext& context, Buffer* ubo,
+                                         const MaterialParams& params) {
+    if (!ubo) return;
+    VmaAllocator allocator = context.getAllocator();
+    // Same staging→GPU_ONLY path as the initial allocation. The descriptor set
+    // already points at this buffer, so no descriptor write is needed.
+    Buffer staging;
+    staging.init(allocator, sizeof(MaterialParams),
+                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+    staging.uploadData(allocator, &params, sizeof(MaterialParams));
+    Buffer::copyBuffer(context, staging.getBuffer(), ubo->getBuffer(), sizeof(MaterialParams));
+    staging.cleanup(allocator);
+}
+
 void Descriptors::resetMaterials(VkDevice device, VmaAllocator allocator) {
     vkResetDescriptorPool(device, m_materialPool, 0);   // frees every material + joint set at once
     for (auto& buf : m_materialUBOs) buf.cleanup(allocator);
