@@ -1,0 +1,11 @@
+Body: imported 1 mesh(es); base=True nrm=True orm=True
+Arms: imported 3 mesh(es); base=True nrm=True orm=True
+Belt: imported 4 mesh(es); base=True nrm=True orm=True
+Cape: imported 1 mesh(es); base=True nrm=True orm=True
+LowerParts: imported 3 mesh(es); base=True nrm=True orm=True
+Neck: imported 5 mesh(es); base=True nrm=True orm=True
+Helmet: imported 1 mesh(es); base=True nrm=True orm=True
+total meshes: 18
+Head: kept ['eyeLeft_lod0_mesh', 'eyeRight_lod0_mesh', 'head_lod0_mesh', 'teeth_lod0_mesh']  base=True nrm=True orm=True
+helmet repositioned by (-0.0, 0.01, 1.5) (ref=head)
+EXPORTED: C:/Users/mrcel/NyxEngine/projects/Sandbox/assets/models/Gladiator/Gladiator.gltf
