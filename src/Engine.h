@@ -121,11 +121,11 @@ private:
     float     m_lastSavedCamFov   = 0.0f;
     float     m_prefsSaveCountdown = -1.0f;   // <=0 idle; >0 counting down to a save
 
-    // Window position parsed from editor.prefs before the window is created.
-    // Size is fed straight into the Window ctor (so the swapchain comes up at the
-    // right resolution); position is applied via Window::setPosition right after
-    // creation. -1 means "no saved value, let the OS pick".
-    struct PendingWindow { int x = -1, y = -1, w = 1280, h = 720; bool maximized = false; };
+    // Persisted window state (editor.prefs). We only persist the MAXIMIZED flag,
+    // not position/size — restoring exact pos/size was the fragile part (monitor
+    // reconfigs, borderless-maximize overhang clipping the UI). Defaults to true
+    // so a brand-new project opens maximized.
+    struct PendingWindow { bool maximized = true; };
     PendingWindow            m_pendingWindow;
 
     // Point-light shadow maps. Up to MAX_POINT_SHADOWS cube maps live for the

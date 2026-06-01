@@ -643,9 +643,9 @@ void Engine::run() {
 
     // Reveal the main window now that the editor is fully initialised. Created
     // hidden in Window — see GLFW_VISIBLE hint — so the splash owns the screen
-    // through startup. Open maximized by default; the first-frame resize check
-    // recreates the swapchain at the work-area size.
-    m_window->maximize();
+    // through startup. Restore the saved maximized state (defaults to maximized);
+    // the first-frame resize check recreates the swapchain at the new size.
+    if (m_pendingWindow.maximized) m_window->maximize();
     m_window->show();
 
     while (!m_window->shouldClose()) {
@@ -3482,7 +3482,8 @@ void Engine::loadEditorPrefs() {
         auto asInt   = [&]{ try { return std::stoi(value); }   catch (...) { return 0; } };
         auto asFloat = [&]{ try { return std::stof(value); }   catch (...) { return 0.0f; } };
 
-        if      (key == "rightDockCollapsed") m_rightDockCollapsed = (asInt() != 0);
+        if      (key == "windowMaximized")    m_pendingWindow.maximized = (asInt() != 0);
+        else if (key == "rightDockCollapsed") m_rightDockCollapsed = (asInt() != 0);
         else if (key == "rightDockWidth")     m_rightDockWidth     = asFloat();
         else if (key == "hierarchyHeight")    m_hierarchyHeight    = asFloat();
         else if (key == "browserExpanded")    m_contentBrowser.setExpanded(asInt() != 0);
@@ -3513,7 +3514,8 @@ void Engine::saveEditorPrefs() {
     fs::create_directories(m_projectPath, ec);
     std::ofstream f(m_projectPath + "/editor.prefs");
     if (!f) return;
-    f << "rightDockCollapsed " << (m_rightDockCollapsed ? 1 : 0) << "\n"
+    f << "windowMaximized "    << (m_window->isMaximized() ? 1 : 0) << "\n"
+      << "rightDockCollapsed " << (m_rightDockCollapsed ? 1 : 0) << "\n"
       << "rightDockWidth "     << m_rightDockWidth                << "\n"
       << "hierarchyHeight "    << m_hierarchyHeight               << "\n"
       << "browserExpanded "    << (m_contentBrowser.isExpanded() ? 1 : 0) << "\n"
@@ -3660,9 +3662,19 @@ void Engine::exportGame(const std::string& destParentArg) {
     namespace fs = std::filesystem;
     std::error_code ec;
 
-    // Flush current state so the export reflects exactly what's on screen.
+    // Flush current state so the export reflects exactly what's on screen — incl.
+    // editor.prefs, which carries the camera pose. The exported game has no game
+    // camera of its own yet, so it reuses that saved pose to frame the scene the
+    // way you set it up; without it the game opens at the default camera and your
+    // objects can be off-screen.
     m_editor.saveAll();
     saveCurrentScene();
+    // Flush editor.prefs (camera pose) only for an interactive menu export — there
+    // the window is in a real maximized/windowed state. A headless --export has no
+    // shown window, so saving here would write a bogus windowMaximized and clobber
+    // the project's saved window state; it just copies the prefs already on disk
+    // (which already carry the camera from the editing session).
+    if (destParentArg.empty()) saveEditorPrefs();
 
     std::string projName = fs::path(m_projectPath).filename().string();
     if (projName.empty()) projName = "Game";
@@ -3741,8 +3753,9 @@ void Engine::exportGame(const std::string& destParentArg) {
              fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
     if (ec) { LOG_ERROR("Export: copy project failed: {}", ec.message()); return; }
     fs::remove_all(projDst / "scenes" / ".history", ec);   ec.clear();
-    fs::remove(projDst / "editor.prefs", ec);              ec.clear();
     fs::remove(projDst / "scenes" / "scene.scene.bak", ec); ec.clear();
+    // Keep editor.prefs: the game reads the saved camera pose from it to frame
+    // the scene (the only "editor" bit the runtime actually uses).
 
     LOG_INFO("Export: done → {}  (double-click {}.exe to play)",
              out.generic_string(), projName);
