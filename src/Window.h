@@ -49,6 +49,9 @@ public:
     void getPosition(int& x, int& y) const;
     // Move the window to a specific screen position.
     void setPosition(int x, int y);
+    // Resize the window (and keep the cached size in sync). Used to restore a
+    // saved windowed size on startup.
+    void setSize(int w, int h);
     // Maximize state — checked at save time so we can restore via the OS
     // rather than re-applying the overhang-offset coordinates Windows uses for
     // maximized windows (which look right while maximized but place the window

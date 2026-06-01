@@ -643,9 +643,13 @@ void Engine::run() {
 
     // Reveal the main window now that the editor is fully initialised. Created
     // hidden in Window — see GLFW_VISIBLE hint — so the splash owns the screen
-    // through startup. Restore the saved maximized state (defaults to maximized);
-    // the first-frame resize check recreates the swapchain at the new size.
-    if (m_pendingWindow.maximized) m_window->maximize();
+    // through startup. Restore the saved window state: maximized (default), else
+    // the saved windowed size. The first-frame resize check recreates the
+    // swapchain at the new size.
+    if (m_pendingWindow.maximized)
+        m_window->maximize();
+    else if (m_pendingWindow.w > 0 && m_pendingWindow.h > 0)
+        m_window->setSize(m_pendingWindow.w, m_pendingWindow.h);
     m_window->show();
 
     while (!m_window->shouldClose()) {
@@ -3483,6 +3487,8 @@ void Engine::loadEditorPrefs() {
         auto asFloat = [&]{ try { return std::stof(value); }   catch (...) { return 0.0f; } };
 
         if      (key == "windowMaximized")    m_pendingWindow.maximized = (asInt() != 0);
+        else if (key == "windowWidth")        m_pendingWindow.w = asInt();
+        else if (key == "windowHeight")       m_pendingWindow.h = asInt();
         else if (key == "rightDockCollapsed") m_rightDockCollapsed = (asInt() != 0);
         else if (key == "rightDockWidth")     m_rightDockWidth     = asFloat();
         else if (key == "hierarchyHeight")    m_hierarchyHeight    = asFloat();
@@ -3515,6 +3521,8 @@ void Engine::saveEditorPrefs() {
     std::ofstream f(m_projectPath + "/editor.prefs");
     if (!f) return;
     f << "windowMaximized "    << (m_window->isMaximized() ? 1 : 0) << "\n"
+      << "windowWidth "        << m_window->getWidth()  << "\n"
+      << "windowHeight "       << m_window->getHeight() << "\n"
       << "rightDockCollapsed " << (m_rightDockCollapsed ? 1 : 0) << "\n"
       << "rightDockWidth "     << m_rightDockWidth                << "\n"
       << "hierarchyHeight "    << m_hierarchyHeight               << "\n"

@@ -510,6 +510,13 @@ void Window::setPosition(int x, int y) {
     if (m_window) glfwSetWindowPos(m_window, x, y);
 }
 
+void Window::setSize(int w, int h) {
+    if (!m_window || w <= 0 || h <= 0) return;
+    glfwSetWindowSize(m_window, w, h);
+    m_width  = w;
+    m_height = h;   // the framebuffer-resize callback also fires; this keeps the cached size in sync
+}
+
 bool Window::isMaximized() const {
 #ifdef _WIN32
     return s_customMax;
