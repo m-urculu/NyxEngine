@@ -40,6 +40,29 @@ target_include_directories(stb INTERFACE external/stb)
 add_library(cgltf INTERFACE)
 target_include_directories(cgltf INTERFACE external/cgltf)
 
+# ── Assimp — multi-format mesh importer (FBX / OBJ / COLLADA / …). Pulled in
+#    via FetchContent so it sits alongside the rest of the externals without
+#    needing a submodule. Trimmed to the few importers we actually use; no
+#    exporters, no tools, no tests so the configure + first build stay light.
+include(FetchContent)
+set(ASSIMP_BUILD_TESTS               OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_SAMPLES             OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ASSIMP_TOOLS        OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INSTALL                   OFF CACHE BOOL "" FORCE)
+set(ASSIMP_NO_EXPORT                 ON  CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_FBX_IMPORTER        ON  CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_OBJ_IMPORTER        ON  CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_COLLADA_IMPORTER    ON  CACHE BOOL "" FORCE)
+set(ASSIMP_WARNINGS_AS_ERRORS        OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INSTALL_PDB               OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(assimp
+    GIT_REPOSITORY https://github.com/assimp/assimp.git
+    GIT_TAG        v5.4.3
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(assimp)
+
 # ── tree-sitter — incremental parser runtime + C/C++ grammar (editor syntax
 #    highlighting). Vendored sources; the generated parser.c is huge so MSVC needs
 #    /bigobj. Warnings silenced (generated/3rd-party C). ──────────────────────────
@@ -86,6 +109,7 @@ set(ENGINE_SOURCES
     src/renderer/Texture.cpp
     src/renderer/CgltfUsage.cpp
     src/renderer/GltfLoader.cpp
+    src/renderer/AssimpLoader.cpp
     src/renderer/ResourceCache.cpp
     src/renderer/ShadowMap.cpp
     src/renderer/PointShadowMap.cpp
@@ -128,6 +152,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     tinyobjloader
     stb
     cgltf
+    assimp
     tree_sitter
 )
 
