@@ -646,17 +646,24 @@ void Engine::run() {
     // through startup. Restore the saved window state: maximized (default), else
     // the saved windowed size. The first-frame resize check recreates the
     // swapchain at the new size.
-    if (m_pendingWindow.maximized)
-        m_window->maximize();
-    else if (m_pendingWindow.w > 0 && m_pendingWindow.h > 0)
+    // Establish the windowed size first, so exiting fullscreen/maximize later
+    // returns to it; then apply fullscreen (highest precedence) or maximized.
+    if (m_pendingWindow.w > 0 && m_pendingWindow.h > 0)
         m_window->setSize(m_pendingWindow.w, m_pendingWindow.h);
+    if (m_pendingWindow.fullscreen)
+        m_window->toggleFullscreen();
+    else if (m_pendingWindow.maximized)
+        m_window->maximize();
     m_window->show();
 
-    // Seed the window-state autosave tracker with the state we just applied, so
-    // the in-loop debounced save only fires once the user actually resizes.
-    m_lastSavedWinW   = m_window->getWidth();
-    m_lastSavedWinH   = m_window->getHeight();
-    m_lastSavedWinMax = m_window->isEffectivelyMaximized();
+    // Seed the autosave trackers with the state we just applied so the in-loop
+    // debounced save only fires once the user actually changes something.
+    m_windowedW = (m_pendingWindow.w > 0) ? m_pendingWindow.w : m_window->getWidth();
+    m_windowedH = (m_pendingWindow.h > 0) ? m_pendingWindow.h : m_window->getHeight();
+    m_lastSavedWinW       = m_window->getWidth();
+    m_lastSavedWinH       = m_window->getHeight();
+    m_lastSavedWinMax     = m_window->isEffectivelyMaximized();
+    m_lastSavedFullscreen = m_window->isFullscreen();
 
     while (!m_window->shouldClose()) {
         m_window->pollEvents();
@@ -851,25 +858,31 @@ void Engine::run() {
             int  ww       = m_window->getWidth();
             int  wh       = m_window->getHeight();
             bool wmax     = m_window->isEffectivelyMaximized();
+            bool wfs      = m_window->isFullscreen();
+            // Remember the size only while plain-windowed (this is what we persist
+            // as the windowed size).
+            if (!wfs && !wmax) { m_windowedW = ww; m_windowedH = wh; }
             bool changed  = p != m_lastSavedCamPos
                          || m_camera.getYaw()   != m_lastSavedCamYaw
                          || m_camera.getPitch() != m_lastSavedCamPitch
                          || m_camera.getFov()   != m_lastSavedCamFov
                          || ww   != m_lastSavedWinW
                          || wh   != m_lastSavedWinH
-                         || wmax != m_lastSavedWinMax;
+                         || wmax != m_lastSavedWinMax
+                         || wfs  != m_lastSavedFullscreen;
             if (changed) m_prefsSaveCountdown = 0.8f;        // (re)arm while changing
             if (m_prefsSaveCountdown > 0.0f) {
                 m_prefsSaveCountdown -= m_time.getDeltaTime();
                 if (m_prefsSaveCountdown <= 0.0f) {
                     saveEditorPrefs();
-                    m_lastSavedCamPos   = p;
-                    m_lastSavedCamYaw   = m_camera.getYaw();
-                    m_lastSavedCamPitch = m_camera.getPitch();
-                    m_lastSavedCamFov   = m_camera.getFov();
-                    m_lastSavedWinW     = ww;
-                    m_lastSavedWinH     = wh;
-                    m_lastSavedWinMax   = wmax;
+                    m_lastSavedCamPos     = p;
+                    m_lastSavedCamYaw     = m_camera.getYaw();
+                    m_lastSavedCamPitch   = m_camera.getPitch();
+                    m_lastSavedCamFov     = m_camera.getFov();
+                    m_lastSavedWinW       = ww;
+                    m_lastSavedWinH       = wh;
+                    m_lastSavedWinMax     = wmax;
+                    m_lastSavedFullscreen = wfs;
                 }
             }
         }
@@ -3502,7 +3515,8 @@ void Engine::loadEditorPrefs() {
         auto asInt   = [&]{ try { return std::stoi(value); }   catch (...) { return 0; } };
         auto asFloat = [&]{ try { return std::stof(value); }   catch (...) { return 0.0f; } };
 
-        if      (key == "windowMaximized")    m_pendingWindow.maximized = (asInt() != 0);
+        if      (key == "windowFullscreen")   m_pendingWindow.fullscreen = (asInt() != 0);
+        else if (key == "windowMaximized")    m_pendingWindow.maximized = (asInt() != 0);
         else if (key == "windowWidth")        m_pendingWindow.w = asInt();
         else if (key == "windowHeight")       m_pendingWindow.h = asInt();
         else if (key == "rightDockCollapsed") m_rightDockCollapsed = (asInt() != 0);
@@ -3536,9 +3550,14 @@ void Engine::saveEditorPrefs() {
     fs::create_directories(m_projectPath, ec);
     std::ofstream f(m_projectPath + "/editor.prefs");
     if (!f) return;
-    f << "windowMaximized "    << (m_window->isEffectivelyMaximized() ? 1 : 0) << "\n"
-      << "windowWidth "        << m_window->getWidth()  << "\n"
-      << "windowHeight "       << m_window->getHeight() << "\n"
+    // Persist the windowed size from the tracked plain-windowed dims (so a session
+    // spent fullscreen/maximized doesn't overwrite it with the monitor size).
+    int savedW = (m_windowedW > 0) ? m_windowedW : m_window->getWidth();
+    int savedH = (m_windowedH > 0) ? m_windowedH : m_window->getHeight();
+    f << "windowFullscreen "   << (m_window->isFullscreen() ? 1 : 0) << "\n"
+      << "windowMaximized "    << (m_window->isEffectivelyMaximized() ? 1 : 0) << "\n"
+      << "windowWidth "        << savedW << "\n"
+      << "windowHeight "       << savedH << "\n"
       << "rightDockCollapsed " << (m_rightDockCollapsed ? 1 : 0) << "\n"
       << "rightDockWidth "     << m_rightDockWidth                << "\n"
       << "hierarchyHeight "    << m_hierarchyHeight               << "\n"

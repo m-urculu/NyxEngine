@@ -124,14 +124,19 @@ private:
     int       m_lastSavedWinW   = 0;
     int       m_lastSavedWinH   = 0;
     bool      m_lastSavedWinMax = false;
+    bool      m_lastSavedFullscreen = false;
     float     m_prefsSaveCountdown = -1.0f;   // <=0 idle; >0 counting down to a save
 
-    // Persisted window state (editor.prefs): the maximized flag and the windowed
-    // size. Position is intentionally NOT persisted (restoring it was the fragile
-    // part — monitor reconfigs could place the window off-screen). Defaults to
-    // maximized for a brand-new project; w/h 0 means "no saved size".
-    struct PendingWindow { bool maximized = true; int w = 0, h = 0; };
+    // Persisted window state (editor.prefs): fullscreen / maximized flags and the
+    // windowed size. Position is intentionally NOT persisted (restoring it was the
+    // fragile part — monitor reconfigs could place the window off-screen). Defaults
+    // to maximized for a brand-new project; w/h 0 means "no saved size".
+    struct PendingWindow { bool fullscreen = false; bool maximized = true; int w = 0, h = 0; };
     PendingWindow            m_pendingWindow;
+    // Last size the window had while plain-windowed (not fullscreen/maximized) —
+    // persisted as the windowed size so exiting fullscreen/maximize returns to it
+    // instead of the monitor/work-area size.
+    int                      m_windowedW = 0, m_windowedH = 0;
 
     // Point-light shadow maps. Up to MAX_POINT_SHADOWS cube maps live for the
     // engine's lifetime; each frame, enabled point lights are assigned to
