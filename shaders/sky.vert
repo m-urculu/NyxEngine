@@ -33,8 +33,14 @@ void main() {
                     (gl_VertexIndex == 2) ? 3.0 : -1.0);
     gl_Position = vec4(ndc, 1.0, 1.0);                 // depth = 1 (far plane)
 
-    // World-space ray from the camera through this corner of the far plane.
-    mat4 invVP    = inverse(ubo.projection * ubo.view);
-    vec4 worldFar = invVP * vec4(ndc, 1.0, 1.0);
-    vDir          = (worldFar.xyz / worldFar.w) - ubo.cameraPosition.xyz;
+    // World-space view ray, reconstructed in a numerically stable way: unproject
+    // to view space with the camera-INDEPENDENT inverse projection, then rotate to
+    // world with the view's rotation only. Using inverse(projection*view) and a
+    // far-plane point instead makes the ray jitter/flash as the camera moves once
+    // the far/near ratio is large (the far plane is 10000) — the full inverse is
+    // recomputed per frame and loses precision at z=1. Here inverse(projection) is
+    // constant and mat3(inverse(view)) is an exact rotation, so the ray is stable.
+    vec4 viewH   = inverse(ubo.projection) * vec4(ndc, 1.0, 1.0);
+    vec3 viewDir = viewH.xyz / viewH.w;                // far-plane point in view space = dir from camera
+    vDir         = mat3(inverse(ubo.view)) * viewDir;  // rotate into world (camera translation irrelevant for an infinite sky)
 }
