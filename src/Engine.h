@@ -321,6 +321,12 @@ private:
     // project first so the copy is up to date.
     void  saveProjectAs();
 
+    // "Export Game" → assemble a self-contained, double-click-to-play folder for
+    // the current project: a copy of this exe, the compiled shaders, the project
+    // content (scenes + assets, minus editor-only history/prefs), and a game.cfg
+    // that makes the copied exe boot straight into the scene (no editor chrome).
+    void  exportGame();
+
     // Undo/redo (Ctrl+Z / Ctrl+Shift+Z): snapshot the whole scene before each mutating
     // action; undo restores the most recent snapshot, redo re-applies it. Covers
     // delete/spawn/paste/duplicate/transform-edit/material-assign uniformly.

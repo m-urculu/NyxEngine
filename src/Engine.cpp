@@ -412,6 +412,7 @@ void Engine::init(StatusFn onStatus) {
             saveCurrentScene();
         }
         else if (action == "saveas")  saveProjectAs();
+        else if (action == "export")  exportGame();
         else if (action == "exit")    glfwSetWindowShouldClose(m_window->getHandle(), GLFW_TRUE);
         else if (action == "openproject") {
             // Steer the picker to the engine's projects/ root (parent of the
@@ -3653,6 +3654,88 @@ void Engine::saveProjectAs() {
 
     // Switch to the copy so the user is now editing it (matches Open Project UX).
     switchProject(dest.generic_string());
+}
+
+void Engine::exportGame() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    // Flush current state so the export reflects exactly what's on screen.
+    m_editor.saveAll();
+    saveCurrentScene();
+
+    std::string projName = fs::path(m_projectPath).filename().string();
+    if (projName.empty()) projName = "Game";
+
+    // Pick a destination parent; we create <dest>/<projName>/ inside it.
+    std::string destParent = m_window->openFolderDialog(
+        "Export Game — pick a destination folder", "");
+    if (destParent.empty()) return;   // cancelled
+
+    fs::path out = fs::path(destParent) / projName;
+    if (fs::exists(out)) {
+        out = fs::path(destParent) / (projName + " Export");
+        for (int n = 2; fs::exists(out); ++n)
+            out = fs::path(destParent) / (projName + " Export " + std::to_string(n));
+    }
+    // Guard: never export into the project itself (dest under source).
+    {
+        fs::path ps = fs::weakly_canonical(fs::path(m_projectPath), ec);
+        fs::path os = fs::weakly_canonical(out, ec);
+        std::string pss = ps.generic_string(), oss = os.generic_string();
+        if (!pss.empty() && oss.rfind(pss + "/", 0) == 0) {
+            LOG_ERROR("Export: destination '{}' is inside the project — aborting", oss);
+            return;
+        }
+    }
+
+    LOG_INFO("Export: building '{}' … (copying assets can take a moment)", out.generic_string());
+    fs::create_directories(out, ec);
+
+    // 1) The running executable. Export from the RELEASE build for a shippable
+    //    game — a Debug exe requests Vulkan validation layers a player won't have.
+    {
+        wchar_t exeBuf[MAX_PATH];
+        DWORD n = GetModuleFileNameW(nullptr, exeBuf, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH) { LOG_ERROR("Export: cannot resolve exe path"); return; }
+        fs::copy_file(fs::path(std::wstring(exeBuf, n)), out / (projName + ".exe"),
+                      fs::copy_options::overwrite_existing, ec);
+        if (ec) { LOG_ERROR("Export: copy exe failed: {}", ec.message()); return; }
+#ifndef NDEBUG
+        LOG_WARN("Export: this is a DEBUG build — the exported game needs the Vulkan "
+                 "SDK to run. Re-export from the Release build before shipping.");
+#endif
+    }
+
+    // 2) Compiled shaders (runtime loads shaders/*.spv by relative path).
+    fs::copy("shaders", out / "shaders",
+             fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    ec.clear();
+
+    // 3) Project content, kept at the SAME relative path the scene's asset
+    //    references use (projects/<name>/…) so nothing needs rewriting. Then prune
+    //    the editor-only bits (undo history, prefs, scene backups).
+    fs::path projDst = out / "projects" / projName;
+    fs::copy(m_projectPath, projDst,
+             fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    if (ec) { LOG_ERROR("Export: copy project failed: {}", ec.message()); return; }
+    fs::remove_all(projDst / "scenes" / ".history", ec);   ec.clear();
+    fs::remove(projDst / "editor.prefs", ec);              ec.clear();
+    fs::remove(projDst / "scenes" / "scene.scene.bak", ec); ec.clear();
+
+    // 4) game.cfg — its presence makes the copied exe boot straight into the
+    //    scene (no editor). Path is relative to the export root.
+    std::string sceneRel = fs::relative(m_currentScenePath, m_projectPath, ec).generic_string();
+    if (ec || sceneRel.empty() || sceneRel.rfind("..", 0) == 0) sceneRel = "scenes/scene.scene";
+    ec.clear();
+    {
+        std::ofstream cfg(out / "game.cfg");
+        cfg << "scene projects/"   << projName << "/" << sceneRel << "\n";
+        cfg << "project projects/" << projName << "\n";
+    }
+
+    LOG_INFO("Export: done → {}  (double-click {}.exe to play)",
+             out.generic_string(), projName);
 }
 
 void Engine::saveCurrentScene() {

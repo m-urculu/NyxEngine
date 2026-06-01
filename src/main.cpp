@@ -10,6 +10,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #ifdef _WIN32
 #  include <windows.h>
@@ -86,12 +88,36 @@ LaunchArgs parseArgs(int argc, char** argv) {
     return out;
 }
 
+// A shipped game has a game.cfg next to the exe (written by File > Export Game):
+//   scene   projects/<Name>/scenes/<file>.scene
+//   project projects/<Name>
+// When present (and no explicit --play was given), boot straight into that scene
+// like --play does. This is what turns an exported folder into a double-click game.
+void readGameConfig(LaunchArgs& la) {
+    namespace fs = std::filesystem;
+    if (!la.playScene.empty()) return;                 // explicit --play wins
+    std::error_code ec;
+    if (!fs::exists("game.cfg", ec)) return;
+    std::ifstream f("game.cfg");
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream ss(line);
+        std::string key; ss >> key;
+        std::string rest; std::getline(ss, rest);
+        size_t s = rest.find_first_not_of(" \t");
+        rest = (s == std::string::npos) ? "" : rest.substr(s);
+        if      (key == "scene")   la.playScene   = rest;
+        else if (key == "project") la.playProject = rest;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     setWorkingDirToProjectRoot();
 
     LaunchArgs la = parseArgs(argc, argv);
+    readGameConfig(la);                                // exported build → boot the game
     const bool gameMode = !la.playScene.empty();
 
     // Splash first (editor only) — shown before any heavy work so the user sees

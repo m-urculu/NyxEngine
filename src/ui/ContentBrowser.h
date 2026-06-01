@@ -152,7 +152,7 @@ private:
     // ── Context menu ─────────────────────────────────────────────────────────
     static constexpr float MENU_ROW_H = 16.0f;
     enum Action { A_OPEN, A_NEWFOLDER, A_NEWFILE, A_NEWMATERIAL, A_CUT, A_COPY, A_PASTE, A_RENAME, A_DELETE, A_REFRESH,
-                  A_NEWPROJECT, A_OPENPROJECT, A_SWITCHPROJECT, A_SAVE, A_SAVEAS, A_EXIT };
+                  A_NEWPROJECT, A_OPENPROJECT, A_SWITCHPROJECT, A_SAVE, A_SAVEAS, A_EXPORT, A_EXIT };
     struct MenuItem { std::string label; int action; std::string arg; };
     static constexpr float FILE_BTN_W   = 36.0f;   // "FILE" header button width (6 px pad each side)
     static constexpr float TOOL_BTN_W   = 18.0f;   // new-file / new-folder header buttons

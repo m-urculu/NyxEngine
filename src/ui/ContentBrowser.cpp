@@ -358,6 +358,7 @@ void ContentBrowser::doAction(int action, const std::string& arg) {
             break;
         case A_SAVE:      if (m_onFileMenu) m_onFileMenu("save");   break;
         case A_SAVEAS:    if (m_onFileMenu) m_onFileMenu("saveas"); break;
+        case A_EXPORT:    if (m_onFileMenu) m_onFileMenu("export"); break;
         case A_EXIT:      if (m_onFileMenu) m_onFileMenu("exit");   break;
     }
 }
@@ -369,6 +370,7 @@ void ContentBrowser::openFileMenu(float x, float y) {
     m_menuItems.push_back({"Open Project", A_OPENPROJECT});
     m_menuItems.push_back({"Save",         A_SAVE});
     m_menuItems.push_back({"Save As...",   A_SAVEAS});
+    m_menuItems.push_back({"Export Game...", A_EXPORT});
     m_menuItems.push_back({"Refresh",      A_REFRESH});
     m_menuItems.push_back({"Exit",         A_EXIT});
     size_t longest = 0; for (const auto& it : m_menuItems) longest = std::max(longest, it.label.size());
