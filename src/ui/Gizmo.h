@@ -26,9 +26,12 @@ public:
     // screen-space edge pairs), the translation gizmo (when visible), and/or a
     // selection-marquee rectangle. origin + tips[3] are the gizmo center/axis tips;
     // hoverAxis (0/1/2) is highlighted; marqueeActive draws a box marqMin→marqMax.
+    // lightIcons: screen-space {center, color} for each point light — drawn as a
+    // small camera-facing "sun" glyph (always shown, regardless of `visible`).
     void update(bool visible, const glm::vec2& origin, const glm::vec2 tips[3], int hoverAxis,
                 bool marqueeActive, const glm::vec2& marqMin, const glm::vec2& marqMax,
-                const std::vector<std::pair<glm::vec2, glm::vec2>>& outlines);
+                const std::vector<std::pair<glm::vec2, glm::vec2>>& outlines,
+                const std::vector<std::pair<glm::vec2, glm::vec4>>& lightIcons = {});
     void draw(VkCommandBuffer cmd);
 
 private:
@@ -44,6 +47,8 @@ private:
     void addLine(const glm::vec2& a, const glm::vec2& b, float thickness, const glm::vec4& color);
     void addTri(const glm::vec2& a, const glm::vec2& b, const glm::vec2& c, const glm::vec4& color);
     void addQuad4(const glm::vec2& a, const glm::vec2& b, const glm::vec2& c, const glm::vec2& d, const glm::vec4& color);
+    void addDisc(const glm::vec2& center, float radius, const glm::vec4& color);   // filled triangle-fan
+    void addLightIcon(const glm::vec2& center, const glm::vec4& color);            // sun glyph for point lights
 };
 
 } // namespace Nyx

@@ -99,6 +99,7 @@ void CodeEditor::cleanup(VmaAllocator allocator) {
 // ─── Documents ───────────────────────────────────────────────────────────────
 
 void CodeEditor::openFile(const std::string& path) {
+    m_showScene = false;   // opening a file reveals the editor
     for (int i = 0; i < (int)m_docs.size(); ++i) {
         if (m_docs[i].path == path) { m_active = i; m_focused = true; m_dirty = true; return; }
     }
@@ -225,6 +226,7 @@ bool CodeEditor::loadDocTexture(Doc& d, const std::string& imgPath) {
 }
 
 void CodeEditor::openImage(const std::string& path) {
+    m_showScene = false;
     for (int i = 0; i < (int)m_docs.size(); ++i)
         if (m_docs[i].path == path) { m_active = i; m_dirty = true; return; }
     vkDeviceWaitIdle(m_device);
@@ -237,6 +239,7 @@ void CodeEditor::openImage(const std::string& path) {
 }
 
 void CodeEditor::openMaterial(const std::string& path) {
+    m_showScene = false;
     for (int i = 0; i < (int)m_docs.size(); ++i)
         if (m_docs[i].path == path) { m_active = i; m_dirty = true; return; }
     vkDeviceWaitIdle(m_device);
@@ -262,6 +265,7 @@ void CodeEditor::openMaterial(const std::string& path) {
 }
 
 void CodeEditor::openBinary(const std::string& path) {
+    m_showScene = false;
     for (int i = 0; i < (int)m_docs.size(); ++i)
         if (m_docs[i].path == path) { m_active = i; m_dirty = true; return; }
     m_docs.push_back(Doc{});
@@ -272,10 +276,10 @@ void CodeEditor::openBinary(const std::string& path) {
 }
 
 bool CodeEditor::activeIsImage() const {
-    const Doc* d = active(); return isVisible() && d && d->kind == Kind::Image && d->hasTex;
+    const Doc* d = active(); return isVisible() && !m_showScene && d && d->kind == Kind::Image && d->hasTex;
 }
 bool CodeEditor::activeIsMaterial() const {
-    const Doc* d = active(); return isVisible() && d && d->kind == Kind::Material && d->hasTex;
+    const Doc* d = active(); return isVisible() && !m_showScene && d && d->kind == Kind::Material && d->hasTex;
 }
 
 void CodeEditor::addImageQuad(float x, float y, float w, float h) {
@@ -436,10 +440,17 @@ bool CodeEditor::handleMouseButton(int button, int action, int mods) {
     glfwGetCursorPos(m_window, &mx, &my);
     if (mx < m_x || mx >= m_x + m_w || my < m_y || my >= m_y + m_h) return false;
 
-    m_focused = true;
-    m_dirty = true;
-
     if (my < m_y + TABBAR_H) {                          // tab bar
+        m_dirty = true;
+        // View toggle (right edge) — flip between editing and the 3D scene view.
+        if (mx >= m_x + m_w - VIEW_BTN_W) {
+            m_showScene = !m_showScene;
+            if (m_showScene) m_focused = false;          // release focus so camera WASD works
+            return true;
+        }
+        // A tab click always returns to the editor view, then selects/closes.
+        m_showScene = false;
+        m_focused = true;
         float tx = m_x;
         for (int i = 0; i < (int)m_docs.size(); ++i) {
             float tw = tabW(m_docs[i]);
@@ -452,6 +463,12 @@ bool CodeEditor::handleMouseButton(int button, int action, int mods) {
         }
         return true;
     }
+
+    // Body shows the 3D scene → let the click reach the viewport (pick / gizmo).
+    if (m_showScene) return false;
+
+    m_focused = true;
+    m_dirty = true;
 
     Doc* d = active();                                  // text area → place cursor
     if (d && d->kind == Kind::Text) {
@@ -479,7 +496,7 @@ bool CodeEditor::handleMouseButton(int button, int action, int mods) {
 }
 
 bool CodeEditor::handleScroll(double yoffset) {
-    if (!isVisible()) return false;
+    if (!isVisible() || m_showScene) return false;   // scene view → wheel zooms the camera
     double mx = 0.0, my = 0.0;
     glfwGetCursorPos(m_window, &mx, &my);
     if (mx < m_x || mx >= m_x + m_w || my < m_y + TABBAR_H || my >= m_y + m_h) return false;
@@ -497,6 +514,25 @@ bool CodeEditor::handleScroll(double yoffset) {
 
 void CodeEditor::update(float left, float top, float right, float bottom) {
     m_x = left; m_y = top; m_w = right - left; m_h = bottom - top;
+    // Tab close 'x' hover — re-tested every frame (not gated by m_dirty) so
+    // the engine flips to the hand cursor as soon as the cursor crosses it.
+    m_overButton = false;
+    if (isVisible() && m_w >= 1.0f && m_h >= TABBAR_H) {
+        double cmx = 0.0, cmy = 0.0;
+        glfwGetCursorPos(m_window, &cmx, &cmy);
+        if (cmx >= m_x && cmx < m_x + m_w && cmy >= m_y && cmy < m_y + TABBAR_H) {
+            if (cmx >= m_x + m_w - VIEW_BTN_W) {
+                m_overButton = true;                     // over the editor⇄scene toggle
+            } else {
+                float tx = m_x;
+                for (const Doc& d : m_docs) {
+                    float tw = tabW(d);
+                    if (cmx >= tx + tw - 11.0f && cmx < tx + tw) { m_overButton = true; break; }
+                    tx += tw;
+                }
+            }
+        }
+    }
     if (!isVisible() || m_w < 1.0f || m_h < TABBAR_H) { m_indexCount = 0; return; }
 
     Doc* d = active();
@@ -531,8 +567,9 @@ void CodeEditor::update(float left, float top, float right, float bottom) {
 
     const float labelY = m_y + std::floor((TABBAR_H - PixelFont::CELL_H) * 0.5f);
 
-    // Editor background + tab bar.
-    addQuad(m_x, m_y, m_w, m_h, bg);
+    // Editor background + tab bar. In scene view the body background is skipped
+    // so the 3D viewport shows through below the tab bar.
+    if (!m_showScene) addQuad(m_x, m_y, m_w, m_h, bg);
     addQuad(m_x, m_y, m_w, TABBAR_H, tabbarBg);
 
     // Tabs.
@@ -547,6 +584,32 @@ void CodeEditor::update(float left, float top, float right, float bottom) {
         addGlyph(tx + tw - 9.0f, labelY, 'x', dimText);
         tx += tw;
     }
+
+    // View toggle (right of the tab bar): switch between the code editor and the
+    // 3D scene/game view. Drawn last so it sits over any tab that overflows under
+    // it; highlighted while scene view is active.
+    {
+        float bx = m_x + m_w - VIEW_BTN_W;
+        addQuad(bx, m_y, VIEW_BTN_W, TABBAR_H, m_showScene ? tabActive : tabbarBg);
+        if (m_showScene) addQuad(bx, m_y + TABBAR_H - 2.0f, VIEW_BTN_W, 2.0f, accent);  // active underline
+
+        // Monitor glyph (screen outline + stand) — reads as "the 3D viewport".
+        const glm::vec4 icol = m_showScene ? tabText : dimText;
+        float cx = std::floor(bx + VIEW_BTN_W * 0.5f);
+        float cy = std::floor(m_y + TABBAR_H * 0.5f);
+        float sw = 13.0f, sh = 9.0f;
+        float sx = cx - std::floor(sw * 0.5f), sy = cy - std::floor(sh * 0.5f) - 1.0f;
+        if (m_showScene) addQuad(sx + 1.0f, sy + 1.0f, sw - 2.0f, sh - 2.0f, accent);  // lit screen
+        addQuad(sx,            sy,             sw,   1.0f, icol);   // top
+        addQuad(sx,            sy + sh - 1.0f, sw,   1.0f, icol);   // bottom
+        addQuad(sx,            sy,             1.0f, sh,   icol);   // left
+        addQuad(sx + sw - 1.0f,sy,             1.0f, sh,   icol);   // right
+        addQuad(cx - 3.0f,     sy + sh + 1.0f, 6.0f, 1.0f, icol);   // stand base
+    }
+
+    // Scene view: nothing more to draw — the body stays empty so the 3D
+    // viewport behind this panel is visible. The tab bar above remains live.
+    if (m_showScene) { upload(); return; }
 
     // Asset preview body (image / material / binary) for non-text tabs.
     if (d && d->kind != Kind::Text) {

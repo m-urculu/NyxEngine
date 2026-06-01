@@ -10,8 +10,10 @@
 #include <iostream>
 #include <stdexcept>
 #include <filesystem>
+#include <string>
 #ifdef _WIN32
 #  include <windows.h>
+#  include <shellapi.h>   // CommandLineToArgvW
 #endif
 
 namespace {
@@ -47,23 +49,69 @@ void setWorkingDirToProjectRoot() {
     }
 }
 
+// Parse the command line for `--play <scene>` (and optional `--project <proj>`).
+// When --play is present the exe boots as the standalone game/play process the
+// editor spawns when you hit Play, rather than as the editor itself. On Windows
+// we read the wide command line so non-ASCII project paths survive.
+struct LaunchArgs { std::string playScene; std::string playProject; };
+
+LaunchArgs parseArgs(int argc, char** argv) {
+    LaunchArgs out;
+#ifdef _WIN32
+    (void)argc; (void)argv;
+    int wargc = 0;
+    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+    if (wargv) {
+        auto toUtf8 = [](const wchar_t* w) -> std::string {
+            int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+            if (len <= 1) return {};
+            std::string s(static_cast<size_t>(len - 1), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), len, nullptr, nullptr);
+            return s;
+        };
+        for (int i = 1; i < wargc; ++i) {
+            std::wstring a = wargv[i];
+            if      (a == L"--play"    && i + 1 < wargc) out.playScene   = toUtf8(wargv[++i]);
+            else if (a == L"--project" && i + 1 < wargc) out.playProject = toUtf8(wargv[++i]);
+        }
+        LocalFree(wargv);
+    }
+#else
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--play"    && i + 1 < argc) out.playScene   = argv[++i];
+        else if (a == "--project" && i + 1 < argc) out.playProject = argv[++i];
+    }
+#endif
+    return out;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     setWorkingDirToProjectRoot();
 
-    // Splash first — shown before any heavy work so the user sees something
-    // immediately after double-clicking the exe. Closed once init is done.
+    LaunchArgs la = parseArgs(argc, argv);
+    const bool gameMode = !la.playScene.empty();
+
+    // Splash first (editor only) — shown before any heavy work so the user sees
+    // something immediately after double-clicking the exe. The game process boots
+    // straight into the scene with no splash.
     Nyx::Splash splash;
-    splash.show();
+    if (!gameMode) splash.show();
 
     try {
         Nyx::Engine engine;
-        engine.init([&](const std::string& s, float p){ splash.setStatus(s, p); });
-        splash.close();
+        if (gameMode) engine.setGameMode(la.playScene, la.playProject);
+
+        Nyx::Engine::StatusFn statusCb;
+        if (!gameMode) statusCb = [&](const std::string& s, float p){ splash.setStatus(s, p); };
+        engine.init(statusCb);
+
+        if (!gameMode) splash.close();
         engine.run();
     } catch (const std::exception& e) {
-        splash.close();
+        if (!gameMode) splash.close();
         // If anything goes wrong, print the error
         std::cerr << "FATAL ERROR: " << e.what() << std::endl;
         return EXIT_FAILURE;

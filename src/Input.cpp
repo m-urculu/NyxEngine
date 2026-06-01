@@ -26,8 +26,13 @@ Inspector*      Input::s_inspector      = nullptr;
 std::function<void()> Input::s_onSaveScene;
 std::function<void()> Input::s_onUndo;
 std::function<void()> Input::s_onRedo;
+std::function<void()> Input::s_onGroupSelected;
 std::function<void(double, double)> Input::s_onViewportPress;
 std::function<void(double)> Input::s_onViewportZoom;
+std::function<void(double, double)> Input::s_onViewportRightClick;
+double Input::s_rightPressX = 0.0;
+double Input::s_rightPressY = 0.0;
+bool   Input::s_rightPressPending = false;
 std::function<bool()> Input::s_onRightDockResize;
 std::function<bool()> Input::s_onHierSplitResize;
 std::function<void()> Input::s_onToggleRightDock;
@@ -144,6 +149,13 @@ void Input::keyCallback([[maybe_unused]] GLFWwindow* window, int key,
         if (s_onToggleRightDock) s_onToggleRightDock();
         return;
     }
+    // Ctrl+G groups the current selection under a new empty parent (DCC-tool standard).
+    if (key == GLFW_KEY_G && action == GLFW_PRESS && (mods & GLFW_MOD_CONTROL)
+        && !(s_editor && s_editor->isFocused())
+        && !(s_contentBrowser && s_contentBrowser->isFocused())) {
+        if (s_onGroupSelected) s_onGroupSelected();
+        return;
+    }
     // Esc releases editor focus (back to camera control).
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && s_editor && s_editor->isFocused()) {
         s_editor->setFocused(false);
@@ -161,6 +173,10 @@ void Input::charCallback([[maybe_unused]] GLFWwindow* window, unsigned int codep
         s_contentBrowser->handleChar(codepoint);            // rename text entry
         return;
     }
+    if (s_hierarchy && s_hierarchy->capturesKeyboard()) {
+        s_hierarchy->handleChar(codepoint);                 // rename text entry on a scene entity
+        return;
+    }
     if (s_console && s_console->capturesKeyboard()) { s_console->handleChar(codepoint); return; }
     if (s_editor) s_editor->handleChar(codepoint);          // editor checks focus internally
 }
@@ -169,7 +185,19 @@ void Input::mouseButtonCallback([[maybe_unused]] GLFWwindow* window, int button,
                                  int action, [[maybe_unused]] int mods) {
     // Forward releases to all panels (drag/resize/drop end).
     if (action == GLFW_RELEASE) {
-        if (button == GLFW_MOUSE_BUTTON_RIGHT) s_lookSuppressed = false;
+        if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+            s_lookSuppressed = false;
+            // A right-press in the viewport that didn't turn into a look-drag
+            // (cursor barely moved) → open the scene context menu.
+            if (s_rightPressPending) {
+                s_rightPressPending = false;
+                double rx = 0.0, ry = 0.0;
+                glfwGetCursorPos(window, &rx, &ry);
+                double dx = rx - s_rightPressX, dy = ry - s_rightPressY;
+                if (dx * dx + dy * dy <= 25.0 && s_onViewportRightClick)   // ≤5px = a click
+                    s_onViewportRightClick(rx, ry);
+            }
+        }
         if (s_titleBar)       s_titleBar->handleMouseButton(button, action);
         if (s_contentBrowser) s_contentBrowser->handleRelease();
         if (s_console)        s_console->handleRelease();
@@ -198,6 +226,12 @@ void Input::mouseButtonCallback([[maybe_unused]] GLFWwindow* window, int button,
             if (s_contentBrowser) s_contentBrowser->setFocused(false);
             if (s_editor)         s_editor->setFocused(false);
             if (s_console)        s_console->setFocused(false);
+        } else {
+            // Fell through to the viewport (or a menu-less panel). Remember the
+            // press; if the cursor barely moves before release it's a click and
+            // the Engine opens the scene context menu (a drag is camera look).
+            s_rightPressPending = true;
+            glfwGetCursorPos(window, &s_rightPressX, &s_rightPressY);
         }
         return;
     }

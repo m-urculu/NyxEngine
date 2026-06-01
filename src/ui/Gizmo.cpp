@@ -23,9 +23,14 @@ void Gizmo::cleanup(VmaAllocator allocator) {
 
 void Gizmo::update(bool visible, const glm::vec2& origin, const glm::vec2 tips[3], int hoverAxis,
                    bool marqueeActive, const glm::vec2& marqMin, const glm::vec2& marqMax,
-                   const std::vector<std::pair<glm::vec2, glm::vec2>>& outlines) {
+                   const std::vector<std::pair<glm::vec2, glm::vec2>>& outlines,
+                   const std::vector<std::pair<glm::vec2, glm::vec4>>& lightIcons) {
     m_vertices.clear();
     m_indices.clear();
+
+    // Point-light icons — a camera-facing sun glyph in the light's colour. Always
+    // shown (independent of `visible`, which gates the translation gizmo).
+    for (const auto& li : lightIcons) addLightIcon(li.first, li.second);
 
     // Selection outlines — a bounding-box wireframe per selected object (orange).
     {
@@ -137,6 +142,34 @@ void Gizmo::addQuad4(const glm::vec2& a, const glm::vec2& b, const glm::vec2& c,
     m_vertices.push_back({d, color, z2, z4, z4});
     m_indices.push_back(base);     m_indices.push_back(base + 1); m_indices.push_back(base + 2);
     m_indices.push_back(base + 2); m_indices.push_back(base + 3); m_indices.push_back(base);
+}
+
+void Gizmo::addDisc(const glm::vec2& center, float radius, const glm::vec4& color) {
+    constexpr int SEG = 12;
+    constexpr float TAU = 6.28318530718f;
+    for (int k = 0; k < SEG; ++k) {
+        float a0 = (float)k       / SEG * TAU;
+        float a1 = (float)(k + 1) / SEG * TAU;
+        addTri(center,
+               center + glm::vec2(std::cos(a0), std::sin(a0)) * radius,
+               center + glm::vec2(std::cos(a1), std::sin(a1)) * radius, color);
+    }
+}
+
+void Gizmo::addLightIcon(const glm::vec2& center, const glm::vec4& color) {
+    // Dark halo for contrast against bright sky, a colored core, and short rays —
+    // reads as a little sun / point-light marker. Camera-facing by construction
+    // (it's drawn in screen space at the light's projected position).
+    const glm::vec4 dark = {0.0f, 0.0f, 0.0f, 0.55f};
+    addDisc(center, 7.0f, dark);
+    addDisc(center, 4.5f, color);
+    constexpr float TAU = 6.28318530718f;
+    for (int k = 0; k < 8; ++k) {
+        float ang = (float)k / 8.0f * TAU;
+        glm::vec2 d{std::cos(ang), std::sin(ang)};
+        addLine(center + d * 6.0f, center + d * 10.0f, 2.6f, dark);   // dark underlay
+        addLine(center + d * 6.0f, center + d * 10.0f, 1.4f, color);  // colored ray
+    }
 }
 
 } // namespace Nyx

@@ -1,11 +1,18 @@
 #include "ui/TitleBar.h"
 #include "ui/PixelFont.h"
+#include "Window.h"
 #include "Logger.h"
 
 #include <cstring>
 #include <algorithm>
 #include <cmath>
 #include <string>
+
+#ifdef _WIN32
+  #define GLFW_EXPOSE_NATIVE_WIN32
+  #include <GLFW/glfw3native.h>
+  #include <windows.h>
+#endif
 
 namespace Nyx {
 
@@ -61,10 +68,12 @@ void TitleBar::cleanup(VmaAllocator allocator) {
 // ════════════════════════════════════════════════════════════════════════════
 
 void TitleBar::update(float windowWidth, float windowHeight, bool cursorActive, float dt,
-                      uint32_t frameIndex, float fpsRightInset) {
+                      uint32_t frameIndex, float fpsRightInset, float leftInset, float topInset) {
     m_windowWidth   = windowWidth;
     m_windowHeight  = windowHeight;
     m_fpsRightInset = fpsRightInset;
+    m_leftInset     = leftInset;
+    m_topInset      = topInset;
 
     // Track FPS every frame (even when the bar is hidden) so the graph stays
     // continuous. We smooth the frame TIME and invert it — averaging 1/dt
@@ -95,6 +104,7 @@ void TitleBar::update(float windowWidth, float windowHeight, bool cursorActive, 
     m_vertices.clear();
     m_indices.clear();
 
+    if (m_captionVisible) {
     // Get cursor position and detect hover only when active
     double mx = 0.0, my = 0.0;
     if (cursorActive) {
@@ -177,7 +187,7 @@ void TitleBar::update(float windowWidth, float windowHeight, bool cursorActive, 
         float cx = snap(btnX + BUTTON_WIDTH * 1.5f);
         const glm::vec4 outline{2.0f, 0.0f, 0.0f, 0.0f}; // rounded-box outline
         const glm::vec4 capsule{3.0f, SR, 0.0f, 0.0f};   // round-capped line
-        bool maxd = glfwGetWindowAttrib(m_window, GLFW_MAXIMIZED) == GLFW_TRUE;
+        bool maxd = Nyx::isCustomMaximized(m_window);
 
         if (!maxd) {
             float half = 4.0f, radius = 1.0f;
@@ -207,12 +217,31 @@ void TitleBar::update(float windowWidth, float windowHeight, bool cursorActive, 
         addShape(cx, cy, h, h, closeIcon, { arm, -arm, -arm,  arm}, data1);
     }
 
+    } // end if (m_captionVisible)
+
     // Everything above is the caption (bar, brand, buttons) — drawn on top.
     uint32_t capIndices = static_cast<uint32_t>(m_indices.size());
 
     // 4. FPS overlay (top-right, below the bar) — appended after the caption so it
     //    can be drawn as a separate, lower layer (under the editor, over the 3D view).
     buildFpsOverlay();
+
+    // 5. Play/Stop button (top-center of the viewport). Lives in this same
+    //    overlay range so it draws via drawFps() regardless of caption state.
+    if (m_onPlayToggle) {
+        double mx = 0.0, my = 0.0;
+        if (cursorActive) glfwGetCursorPos(m_window, &mx, &my);
+        // Centre between the content-browser (left) and the right dock (right).
+        float left   = m_leftInset;
+        float right  = m_windowWidth - m_fpsRightInset;
+        float cx     = std::floor((left + right) * 0.5f - m_playW * 0.5f);
+        m_playX = cx;
+        m_playY = BAR_HEIGHT + m_topInset + 8.0f;   // below the editor tab bar when one is shown
+        m_playHover = cursorActive && hitTestPlay(mx, my);
+        buildPlayButton();
+    } else {
+        m_playHover = false;
+    }
 
     // Upload into this in-flight frame's own buffer set (avoids tearing the FPS
     // graph when the GPU is still reading the previous frame's geometry).
@@ -269,6 +298,17 @@ bool TitleBar::handleMouseButton(int button, int action) {
     double mx, my;
     glfwGetCursorPos(m_window, &mx, &my);
 
+    // Play/Stop button — handled before the caption guard, since the in-engine
+    // caption is hidden whenever the OS draws the title bar (so m_captionVisible
+    // is false during normal editing) but the play toolbar still floats over the
+    // viewport and must stay clickable.
+    if (action == GLFW_PRESS && m_onPlayToggle && hitTestPlay(mx, my)) {
+        m_onPlayToggle();
+        return true;
+    }
+
+    if (!m_captionVisible) return false;
+
     if (action == GLFW_PRESS) {
         // Check buttons first
         HoverZone zone = hitTestButtons(mx, my);
@@ -283,9 +323,9 @@ bool TitleBar::handleMouseButton(int button, int action) {
             return true;
         }
         if (zone == HoverZone::Maximize) {
-            // Use the OS maximize/restore so it matches Aero Snap / double-click.
-            if (glfwGetWindowAttrib(m_window, GLFW_MAXIMIZED)) glfwRestoreWindow(m_window);
-            else                                               glfwMaximizeWindow(m_window);
+            // Custom borderless maximize — SetWindowPos to work area directly,
+            // bypassing the OS maximize state machine. See Window.cpp.
+            Nyx::toggleCustomMaximize(m_window);
             return true;
         }
 
@@ -305,6 +345,17 @@ bool TitleBar::handleMouseButton(int button, int action) {
 
         // Check title bar drag
         if (zone == HoverZone::Bar) {
+#ifdef _WIN32
+            // Drag-from-custom-maximized: exit custom max first (which restores
+            // to the saved windowed rect), then hand off the drag.
+            if (Nyx::isCustomMaximized(m_window)) {
+                Nyx::toggleCustomMaximize(m_window);
+                HWND hwnd = glfwGetWin32Window(m_window);
+                ReleaseCapture();
+                SendMessage(hwnd, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0);
+                return true;
+            }
+#endif
             m_dragging = true;
             glfwGetCursorPos(m_window, &m_dragStartMouseX, &m_dragStartMouseY);
             glfwGetWindowPos(m_window, &m_dragStartWinX, &m_dragStartWinY);
@@ -444,6 +495,20 @@ void TitleBar::addQuad(float x, float y, float w, float h, const glm::vec4& colo
     m_indices.push_back(base);
 }
 
+void TitleBar::addTriangle(const glm::vec2& a, const glm::vec2& b, const glm::vec2& c,
+                           const glm::vec4& color) {
+    // Solid fill (shape 0): local/data unused by the shader for this case.
+    const glm::vec2 zero2{0.0f, 0.0f};
+    const glm::vec4 zero4{0.0f, 0.0f, 0.0f, 0.0f};
+    uint32_t base = static_cast<uint32_t>(m_vertices.size());
+    m_vertices.push_back({{a.x, a.y}, color, zero2, zero4, zero4});
+    m_vertices.push_back({{b.x, b.y}, color, zero2, zero4, zero4});
+    m_vertices.push_back({{c.x, c.y}, color, zero2, zero4, zero4});
+    m_indices.push_back(base);
+    m_indices.push_back(base + 1);
+    m_indices.push_back(base + 2);
+}
+
 void TitleBar::addShape(float cx, float cy, float halfW, float halfH,
                         const glm::vec4& color, const glm::vec4& data0,
                         const glm::vec4& data1) {
@@ -546,7 +611,7 @@ void TitleBar::buildFpsOverlay() {
     // Right-aligned to the 3D viewport (inset past the right-hand dock) so the
     // overlay floats over the scene rather than bleeding under the dock panels.
     float px = std::floor(m_windowWidth - m_fpsRightInset - 12.0f - PW);
-    float py = BAR_HEIGHT + 8.0f;                           // just below the bar
+    float py = BAR_HEIGHT + m_topInset + 8.0f;              // below the bar (+ editor tab bar if shown)
 
     // Colors authored in sRGB (ui.frag converts to linear).
     const glm::vec4 panelBg  = {0.04f, 0.05f, 0.06f, 0.62f};
@@ -592,6 +657,40 @@ void TitleBar::buildFpsOverlay() {
         addQuad(xcol, gBottom - h, 1.0f, h,    fillCol);    // filled column
         addQuad(xcol, gBottom - h, 1.0f, 1.0f, lineCol);    // bright cap = the "line"
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// PLAY / STOP BUTTON
+// ────────────────────────────────────────────────────────────────────────────
+
+void TitleBar::buildPlayButton() {
+    const float x = m_playX, y = m_playY, w = m_playW, h = m_playH;
+    const float hw = w * 0.5f, hh = h * 0.5f;
+    const float cx = std::floor(x + hw) + 0.5f;   // pixel-centered for crisp icon
+    const float cy = std::floor(y + hh) + 0.5f;
+
+    // Panel background — flat square-cornered fill, matching the engine's
+    // min/max/close buttons (no rounded corners). Brightens on hover. Authored
+    // in sRGB (ui.frag converts to linear).
+    const glm::vec4 bg      = m_playHover ? glm::vec4{0.22f, 0.23f, 0.27f, 0.94f}
+                                          : glm::vec4{0.11f, 0.12f, 0.14f, 0.86f};
+    addQuad(x, y, w, h, bg);
+
+    if (!m_playRunning) {
+        // Green right-pointing play triangle.
+        const glm::vec4 green{0.42f, 0.92f, 0.56f, 1.0f};
+        addTriangle({cx - 4.0f, cy - 6.0f}, {cx - 4.0f, cy + 6.0f}, {cx + 6.0f, cy}, green);
+    } else {
+        // Red stop square.
+        const glm::vec4 red{0.96f, 0.45f, 0.42f, 1.0f};
+        addQuad(cx - 5.0f, cy - 5.0f, 10.0f, 10.0f, red);
+    }
+}
+
+bool TitleBar::hitTestPlay(double mx, double my) const {
+    if (!m_onPlayToggle) return false;
+    return mx >= m_playX && mx < m_playX + m_playW &&
+           my >= m_playY && my < m_playY + m_playH;
 }
 
 TitleBar::HoverZone TitleBar::hitTestButtons(double mx, double my) const {

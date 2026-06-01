@@ -16,6 +16,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <unordered_set>
 
 namespace Nyx {
 
@@ -23,7 +24,8 @@ class Registry;
 
 class SceneHierarchy {
 public:
-    enum class Command { Delete, Copy, Cut, Paste, Duplicate };
+    enum class Command { Delete, Copy, Cut, Paste, Duplicate, Group, Ungroup, Rename,
+                         CreateCube, CreatePointLight, CreateDirLight };
 
     static constexpr float HEADER_H   = 20.0f;
     static constexpr float ROW_H      = 14.0f;
@@ -39,6 +41,10 @@ public:
     bool handleMouseButton(int button, int action);   // press → record (resolved on release/drag)
     void handleRelease();                              // resolve click vs marquee
     bool handleRightPress();                           // open the context menu (true if over panel)
+    // Open the same context menu at an arbitrary screen position (a viewport
+    // right-click), clamped to the window rather than the panel. The Engine sets
+    // the selection first so the menu's selection-dependent items match.
+    void openContextMenuAt(double sx, double sy);
     bool handleScroll(double yoffset);
     bool handleKey(int key, int action, int mods);     // Del / Ctrl+C/X/V/A when focused
     bool menuOpen() const { return m_menuOpen; }
@@ -56,6 +62,20 @@ public:
     // Engine-driven selection (spawn/paste select the new entities).
     void setSelection(const std::vector<Entity>& sel);
     const std::vector<Entity>& selection() const { return m_selected; }
+
+    // Mark a group entity as expanded so its children are visible immediately
+    // after a Group action. Idempotent.
+    void expandGroup(Entity e) { if (e != NULL_ENTITY) m_expandedGroups.insert(e); }
+
+    // Inline rename — kicks the panel into "type a name on this row" mode.
+    // Returns false if the entity isn't visible (e.g. inside a collapsed parent).
+    bool  startRename(Entity e, const std::string& initial);
+    void  handleChar(unsigned int codepoint);   // routed via Input::charCallback
+    bool  capturesKeyboard() const { return m_renamingEntity != NULL_ENTITY; }
+
+    // Engine listens here for committed renames (Enter / focus loss). Engine
+    // assigns the NameComponent and pushes any undo it wants.
+    void setRenameCommitCallback(std::function<void(Entity, std::string)> cb) { m_onRenameCommit = std::move(cb); }
 
     // Splice newly-created entities into the manual order right after the
     // lowest of their source entities. Used by Duplicate so a duped row lands
@@ -85,7 +105,14 @@ private:
     bool m_collapsedRail     = false;
     bool m_overButton        = false;   // re-tested every update()
     enum class Kind { Mesh, Light, Environment, Other };
-    struct Row { Entity entity; std::string label; Kind kind; };
+    struct Row {
+        Entity      entity;
+        std::string label;
+        Kind        kind;
+        int         depth        = 0;       // 0 = root, >0 = nested under a group
+        bool        hasChildren  = false;   // a parent — draw expand/collapse chevron
+        bool        expanded     = false;   // current state of that chevron
+    };
 
     // 1px-quad text overflows small buffers; over-capacity geometry is dropped.
     static constexpr uint32_t VERT_CAP = 49152;
@@ -105,6 +132,13 @@ private:
     std::function<void(Command)> m_onCommand;
     std::function<void(Entity)>  m_onActivate;
     std::function<void()>        m_onToggleCollapse;
+    std::function<void(Entity, std::string)> m_onRenameCommit;
+
+    // Inline-rename state. m_renamingEntity == NULL_ENTITY when not active.
+    Entity      m_renamingEntity = NULL_ENTITY;
+    std::string m_renameBuffer;
+    void        commitRename();
+    void        cancelRename();
 
     // Cached hit-rect of the in-header ◀ collapse button — recomputed each
     // update() so handleMouseButton can act on it.
@@ -130,6 +164,16 @@ private:
     // Environment singleton is not in here — buildRows always pins it to the
     // top regardless of order.
     std::vector<Entity> m_order;
+
+    // Entity IDs of groups (parents) the user has expanded. Anything not in
+    // here is collapsed. Tracked on the hierarchy itself rather than the engine
+    // because it's pure UI state.
+    std::unordered_set<Entity> m_expandedGroups;
+
+    // Hit-rect of the chevron drawn at the front of a row, recomputed each
+    // update() per visible row that has children.
+    struct ChevronHit { Entity entity; float x, y, w, h; };
+    std::vector<ChevronHit> m_chevronHits;
 
     // Drag-to-reorder state. A press on a row that moves past the marquee
     // threshold starts a reorder drag instead of a rubber-band marquee.

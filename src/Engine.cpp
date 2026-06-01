@@ -33,6 +33,10 @@
 #include <limits>
 #include <unordered_map>
 
+#ifdef _WIN32
+#  include <windows.h>
+#endif
+
 namespace Nyx {
 
 namespace {
@@ -114,7 +118,11 @@ void makeCube(std::vector<Vertex>& v, std::vector<uint32_t>& idx) {
     for (const Face& f : faces) {
         uint32_t base = (uint32_t)v.size();
         for (int k = 0; k < 4; ++k) v.push_back({f.p[k], f.n, c, uv[k]});
-        idx.insert(idx.end(), {base, base+1, base+2, base+2, base+3, base});
+        // CCW-outward winding so the geometric normal matches the declared face
+        // normal and back-face culling keeps the outside visible. The naive
+        // {0,1,2, 2,3,0} order inverts it (faces cull away, you see the inside of
+        // the cube — looks unlit) — same fix makePlane needed. See makePlane above.
+        idx.insert(idx.end(), {base, base+2, base+1, base+2, base, base+3});
     }
 }
 
@@ -199,10 +207,15 @@ void writeLastProjectPath(const std::string& path) {
 Engine::Engine() = default;
 
 Engine::~Engine() {
+    // Don't leave an orphaned game window when the editor closes.
+    stopPlay();
+
     m_renderer.waitIdle(m_vulkanContext.getDevice());
 
     // Persist editor layout (collapse + sizes) before tearing things down.
-    saveEditorPrefs();
+    // Skipped in game mode: the transient play process must not overwrite the
+    // editor's saved camera pose / panel sizes.
+    if (!m_gameMode) saveEditorPrefs();
 
     m_editor.cleanup(m_vulkanContext.getAllocator());
     m_gizmo.cleanup(m_vulkanContext.getAllocator());
@@ -227,6 +240,12 @@ Engine::~Engine() {
     LOG_INFO("Engine shut down");
 }
 
+void Engine::setGameMode(const std::string& scenePath, const std::string& projectPath) {
+    m_gameMode        = true;
+    m_gameScenePath   = scenePath;
+    m_gameProjectPath = projectPath;
+}
+
 void Engine::init(StatusFn onStatus) {
     m_statusFn = onStatus;   // lower layers (loadScene/loadGltfScene) tick into this
     auto status = [&](const char* s, float p) { if (onStatus) onStatus(s, p); };
@@ -234,10 +253,15 @@ void Engine::init(StatusFn onStatus) {
     Logger::init();
     LOG_INFO("=== Nyx v0.3.0 (Phase 3B) ===");
 
+    // Game mode: the content root is fixed by the launching editor, not by the
+    // last-project file. Set it up front so window title / scene load below use it.
+    if (m_gameMode && !m_gameProjectPath.empty())
+        m_projectPath = std::filesystem::path(m_gameProjectPath).generic_string();
+
     // Re-open the last project the user worked in. Falls back to the default
     // m_projectPath ("projects/Sandbox") on first run or if the saved folder
-    // no longer exists.
-    {
+    // no longer exists. Skipped in game mode (the editor dictates the project).
+    if (!m_gameMode) {
         std::string last = readLastProjectPath();
         if (!last.empty() && std::filesystem::exists(last)) {
             m_projectPath = std::filesystem::path(last).generic_string();
@@ -252,7 +276,7 @@ void Engine::init(StatusFn onStatus) {
     // when restored to a maximize-overhang position without re-maximizing.
     // Users resize / maximize each session; that's what a regular Windows app
     // does.
-    m_window = std::make_unique<Window>("Nyx Engine", 1280, 720);
+    m_window = std::make_unique<Window>(m_gameMode ? "Nyx \xE2\x80\x94 Play" : "Nyx Engine", 1280, 720);
 
     status("Initialising Vulkan...", 0.08f);
     m_vulkanContext.init(m_window->getHandle());
@@ -431,6 +455,9 @@ void Engine::init(StatusFn onStatus) {
             case SceneHierarchy::Command::Duplicate: duplicateSelection(); break;
             case SceneHierarchy::Command::Group:     groupSelected();      break;
             case SceneHierarchy::Command::Ungroup:   ungroupSelected();    break;
+            case SceneHierarchy::Command::CreateCube:       createCubeEntity();        break;
+            case SceneHierarchy::Command::CreatePointLight: createLightEntity(false);  break;
+            case SceneHierarchy::Command::CreateDirLight:   createLightEntity(true);   break;
             case SceneHierarchy::Command::Rename: {
                 if (m_hierarchy.selection().empty()) break;
                 Entity e = m_hierarchy.selection().back();
@@ -502,6 +529,16 @@ void Engine::init(StatusFn onStatus) {
         else if (m_inspector.hitMaterialSlot(mx, my)) assignMaterialToSelected(path);
     });
 
+    // Play/Stop toolbar (editor only). Toggling launches the standalone game
+    // process or terminates the running one; the game process never shows the
+    // button (no callback set → not drawn / not hit-tested).
+    if (!m_gameMode) {
+        m_titleBar.setOnPlayToggle([this]() {
+            if (isPlayRunning()) stopPlay();
+            else                 launchPlay();
+        });
+    }
+
     Input::init(m_window->getHandle(), m_window.get());
     Input::setTitleBar(&m_titleBar);
     Input::setContentBrowser(&m_contentBrowser);
@@ -514,6 +551,7 @@ void Engine::init(StatusFn onStatus) {
     Input::setRedoCallback([this]() { redo(); });
     Input::setGroupSelectedCallback([this]() { groupSelected(); });
     Input::setViewportPressCallback([this](double mx, double my) { onViewportPress(mx, my); });
+    Input::setViewportRightClickCallback([this](double mx, double my) { onViewportRightClick(mx, my); });
     Input::setViewportZoomCallback([this](double sy) { m_camera.dolly(static_cast<float>(sy), selectionPivot()); });
     Input::setRightDockResizeCallback([this]() {
         if (!overRightDockEdge()) return false;
@@ -541,6 +579,13 @@ void Engine::init(StatusFn onStatus) {
         m_pendingCameraPose.has = false;
     }
 
+    // Seed the autosave tracker with the pose we just restored so the in-session
+    // debounced save (in run()) only fires once the user actually moves.
+    m_lastSavedCamPos   = m_camera.getPosition();
+    m_lastSavedCamYaw   = m_camera.getYaw();
+    m_lastSavedCamPitch = m_camera.getPitch();
+    m_lastSavedCamFov   = m_camera.getFov();
+
     m_time.init();
 
     // Load the project's saved scene if one exists; otherwise seed the demo scene
@@ -549,7 +594,11 @@ void Engine::init(StatusFn onStatus) {
     // saved state is what loads, including the gladiator with full PBR maps and
     // any transforms you've applied (.scene round-trips materials losslessly).
     {
-        std::string projectScene = m_projectPath + "/scenes/scene.scene";
+        // Game mode loads the exact scene the editor handed us; otherwise the
+        // project's saved scene.
+        std::string projectScene = (m_gameMode && !m_gameScenePath.empty())
+                                  ? m_gameScenePath
+                                  : (m_projectPath + "/scenes/scene.scene");
         if (std::filesystem::exists(projectScene)) {
             status("Loading scene...", 0.65f);
             loadScene(projectScene);
@@ -574,11 +623,15 @@ void Engine::init(StatusFn onStatus) {
     m_statusFn = nullptr;   // splash is about to close
     // Persist whichever project is now loaded so future launches reopen it
     // even after a clean first-run (where last_project.txt didn't exist yet).
-    writeLastProjectPath(m_projectPath);
+    // Not in game mode — the transient play process must not change which project
+    // the editor reopens next.
+    if (!m_gameMode) writeLastProjectPath(m_projectPath);
     LOG_INFO("Engine initialized successfully!");
 }
 
 void Engine::run() {
+    if (m_gameMode) { runGame(); return; }
+
     LOG_INFO("Entering main loop");
 
     // Note: live content updates during a Win32 modal resize/move drag are
@@ -589,7 +642,9 @@ void Engine::run() {
 
     // Reveal the main window now that the editor is fully initialised. Created
     // hidden in Window — see GLFW_VISIBLE hint — so the splash owns the screen
-    // through startup.
+    // through startup. Open maximized by default; the first-frame resize check
+    // recreates the swapchain at the work-area size.
+    m_window->maximize();
     m_window->show();
 
     while (!m_window->shouldClose()) {
@@ -618,13 +673,21 @@ void Engine::run() {
         // The OS draws the title bar now, so hide the in-engine CAPTION
         // (logo, "Nyx Engine" text, min/max/close buttons). Keep the widget
         // itself "visible" so the FPS overlay (top-right) still renders.
+        // Detect the game process exiting (window closed / crashed) so the
+        // toolbar flips Stop → Play on its own.
+        updatePlayProcess();
+
         m_titleBar.setVisible(!m_window->isFullscreen());
         m_titleBar.setCaptionVisible(false);
+        m_titleBar.setPlayRunning(isPlayRunning());
         bool cursorFree = !Input::isCursorCaptured();
         m_titleBar.update(static_cast<float>(m_window->getWidth()),
                           static_cast<float>(m_window->getHeight()), cursorFree,
                           m_time.getDeltaTime(), m_renderer.getCurrentFrame(),
-                          m_window->isFullscreen() ? 0.0f : m_rightDockWidth);
+                          m_window->isFullscreen() ? 0.0f : m_rightDockWidth,
+                          m_window->isFullscreen() ? 0.0f : m_contentBrowser.currentWidth(),
+                          // Push the play button + FPS overlay below the editor tab bar when one is shown.
+                          (!m_window->isFullscreen() && m_editor.hasDocs()) ? CodeEditor::TABBAR_H : 0.0f);
         if (cursorFree) {
             m_titleBar.handleDragResize();
         }
@@ -767,17 +830,163 @@ void Engine::run() {
             saveCurrentScene();
             m_sceneDirty = false;
         }
+
+        // Persist the camera pose during the session (debounced ~0.8s after it
+        // settles), not only in the destructor — so the view survives a crash or a
+        // non-clean exit, the same way the scene auto-saves continuously.
+        {
+            glm::vec3 p = m_camera.getPosition();
+            bool moved = p != m_lastSavedCamPos
+                      || m_camera.getYaw()   != m_lastSavedCamYaw
+                      || m_camera.getPitch() != m_lastSavedCamPitch
+                      || m_camera.getFov()   != m_lastSavedCamFov;
+            if (moved) m_prefsSaveCountdown = 0.8f;          // (re)arm while moving
+            if (m_prefsSaveCountdown > 0.0f) {
+                m_prefsSaveCountdown -= m_time.getDeltaTime();
+                if (m_prefsSaveCountdown <= 0.0f) {
+                    saveEditorPrefs();
+                    m_lastSavedCamPos   = p;
+                    m_lastSavedCamYaw   = m_camera.getYaw();
+                    m_lastSavedCamPitch = m_camera.getPitch();
+                    m_lastSavedCamFov   = m_camera.getFov();
+                }
+            }
+        }
     }
 
     LOG_INFO("Main loop ended");
 }
 
+// ── Standalone game/play loop ───────────────────────────────────────────────
+// Runs in the child process launched with `--play`. No editor chrome, no
+// gizmo/picking, free-fly camera, ESC to quit, and — critically — no scene
+// autosave, so a play session never mutates the project on disk.
+void Engine::runGame() {
+    LOG_INFO("Entering game loop (play mode)");
+
+    // Hide every editor panel. Their draw() calls early-out on !isVisible(), so
+    // only the 3D scene reaches the screen (same path the editor's fullscreen
+    // mode already exercises). We never flip these back on in this process.
+    m_titleBar.setVisible(false);
+    m_contentBrowser.setVisible(false);
+    m_console.setVisible(false);
+    m_editor.setVisible(false);
+    m_hierarchy.setVisible(false);
+    m_inspector.setVisible(false);
+
+    // Play window opens maximized (the chosen "maximize viewport" play layout).
+    m_window->maximize();
+    m_window->show();
+
+    while (!m_window->shouldClose()) {
+        m_window->pollEvents();
+
+        Input::update();
+        m_time.update();
+
+        if (Input::isKeyDown(GLFW_KEY_ESCAPE))
+            glfwSetWindowShouldClose(m_window->getHandle(), GLFW_TRUE);
+
+        while (m_time.shouldTick()) {
+            fixedUpdate(Time::FIXED_DT);
+            m_time.consumeTick();
+        }
+
+        if (m_window->wasResized()) {
+            m_window->resetResizedFlag();
+            handleResize();
+            continue;
+        }
+
+        updateUniformBuffer(m_renderer.getCurrentFrame());
+
+        bool ok = m_renderer.drawFrame(m_vulkanContext, m_swapchain, m_pipeline,
+                                        m_registry, m_descriptors, &m_shadowMap,
+                                        m_pointShadows.data(),
+                                        m_pointShadowJobs.data(), m_pointShadowJobs.size(),
+                                        &m_uiPipeline, &m_titleBar, &m_contentBrowser, &m_console, &m_editor,
+                                        &m_imagePipeline, &m_matPreviewPipeline,
+                                        &m_hierarchy, &m_inspector, &m_gizmo);
+        if (!ok) handleResize();
+        // No saveCurrentScene() — play mode is non-destructive.
+    }
+
+    LOG_INFO("Game loop ended");
+}
+
+// ── Editor side: launch / stop / poll the standalone game process ───────────
+void Engine::launchPlay() {
+    if (m_playProcess) return;   // already running (toggle guards this too)
+
+    // Persist the current edits first so the child loads exactly what's on screen.
+    m_editor.saveAll();
+    saveCurrentScene();
+
+#ifdef _WIN32
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    std::string scenePath = m_currentScenePath.empty()
+                          ? (m_projectPath + "/scenes/scene.scene")
+                          : m_currentScenePath;
+    std::wstring sceneW = fs::absolute(scenePath, ec).wstring();
+    std::wstring projW  = fs::absolute(m_projectPath, ec).wstring();
+
+    wchar_t exeBuf[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, exeBuf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) { LOG_WARN("launchPlay: cannot resolve exe path"); return; }
+    std::wstring exeW(exeBuf, n);
+
+    std::wstring cmd = L"\"" + exeW + L"\" --play \"" + sceneW + L"\" --project \"" + projW + L"\"";
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+
+    STARTUPINFOW si{};        si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    BOOL okp = CreateProcessW(exeW.c_str(), cmdBuf.data(), nullptr, nullptr, FALSE,
+                              0, nullptr, nullptr, &si, &pi);
+    if (!okp) { LOG_WARN("launchPlay: CreateProcess failed (err {})", (unsigned)GetLastError()); return; }
+
+    CloseHandle(pi.hThread);
+    m_playProcess = pi.hProcess;
+    LOG_INFO("Play: launched game process (pid {})", (unsigned)pi.dwProcessId);
+#else
+    LOG_WARN("launchPlay: standalone play is only implemented on Windows");
+#endif
+}
+
+void Engine::stopPlay() {
+#ifdef _WIN32
+    if (m_playProcess) {
+        TerminateProcess(static_cast<HANDLE>(m_playProcess), 0);
+        CloseHandle(static_cast<HANDLE>(m_playProcess));
+        m_playProcess = nullptr;
+        LOG_INFO("Play: stopped game process");
+    }
+#endif
+}
+
+void Engine::updatePlayProcess() {
+#ifdef _WIN32
+    if (m_playProcess
+        && WaitForSingleObject(static_cast<HANDLE>(m_playProcess), 0) == WAIT_OBJECT_0) {
+        CloseHandle(static_cast<HANDLE>(m_playProcess));
+        m_playProcess = nullptr;
+        LOG_INFO("Play: game process exited");
+    }
+#endif
+}
+
 void Engine::fixedUpdate(float dt) {
-    m_camera.update(dt);
+    // Focus pivot drives both the dynamic WASD fly speed and middle-mouse orbit:
+    // the selected object's centre, or a point ahead of the camera when nothing
+    // is selected. Computed once per tick and shared.
+    glm::vec3 pivot = selectionPivot();
+    m_camera.update(dt, pivot);
 
     // Middle-mouse drag orbits the camera around the current selection.
     if (Input::isOrbiting())
-        m_camera.orbit(selectionPivot(), Input::getMouseDeltaX(), Input::getMouseDeltaY());
+        m_camera.orbit(pivot, Input::getMouseDeltaX(), Input::getMouseDeltaY());
 
     // Orbit the child entity around its parent
     if (m_orbitEntity != NULL_ENTITY && m_registry.has<TransformComponent>(m_orbitEntity)) {
@@ -1464,6 +1673,47 @@ Entity Engine::pickEntity(double mx, double my, float winW, float winH) {
     return best;
 }
 
+// True when the 3D scene is the thing under (mx,my): inside the central area and
+// not covered by the code editor (which only covers it when tabs are open and the
+// editor⇄scene toggle is OFF). Gates the viewport right-click context menu.
+bool Engine::cursorOverViewport(double mx, double my) const {
+    const bool fs = m_window->isFullscreen();
+    float winW = static_cast<float>(m_window->getWidth());
+    float winH = static_cast<float>(m_window->getHeight());
+
+    float left       = (!fs && m_contentBrowser.isVisible()) ? m_contentBrowser.currentWidth() : 0.0f;
+    float rightDockW = fs ? 0.0f : (m_rightDockCollapsed ? RIGHT_DOCK_COLLAPSED_W : m_rightDockWidth);
+    float midRight   = winW - rightDockW;
+    float top        = TitleBar::BAR_HEIGHT;
+    // When the editor panel is up, its tab bar occupies the top strip of the
+    // central area — exclude it (in scene-view the scene shows below the bar).
+    if (!fs && m_editor.isVisible()) top += CodeEditor::TABBAR_H;
+    float bottom     = (!fs && m_console.isVisible()) ? (winH - m_console.currentHeight()) : winH;
+
+    if (mx < left || mx >= midRight || my < top || my >= bottom) return false;
+    // Editor with code open (and not toggled to scene-view) covers the scene.
+    bool editorCoveringWithCode = m_editor.isVisible() && !m_editor.showingScene();
+    return !editorCoveringWithCode;
+}
+
+void Engine::onViewportRightClick(double mx, double my) {
+    if (!m_hierarchy.isVisible()) return;        // the hierarchy renders the menu
+    if (!cursorOverViewport(mx, my))  return;
+
+    // Pick the object under the cursor. If it isn't already in the selection,
+    // select just it so Delete / Duplicate / etc. act on what was clicked. Empty
+    // space leaves the selection as-is (Create still works; clipboard ops use it).
+    float winW = static_cast<float>(m_window->getWidth());
+    float winH = static_cast<float>(m_window->getHeight());
+    Entity hit = pickEntity(mx, my, winW, winH);
+    if (hit != NULL_ENTITY) {
+        const auto& sel = m_hierarchy.selection();
+        if (std::find(sel.begin(), sel.end(), hit) == sel.end())
+            m_hierarchy.setSelection({hit});     // fires onSelect → m_selectedEntity
+    }
+    m_hierarchy.openContextMenuAt(mx, my);
+}
+
 void Engine::onViewportPress(double mx, double my) {
     GLFWwindow* w = m_window->getHandle();
 
@@ -1667,7 +1917,25 @@ void Engine::updateGizmo(float winW, float winH, bool cursorActive) {
                 if (!(i & b) && okc[i] && okc[i | b]) outlines.push_back({sc[i], sc[i | b]});
     }
 
-    m_gizmo.update(m_gizmoVisible, m_gizmoOrigin, m_gizmoTip, hoverAxis, marqueeActive, mq0, mq1, outlines);
+    // ── Point-light icons: a camera-facing sun glyph at each light's position ──
+    // Replaces the old lit gizmo sphere (which read as a dark ball). Screen-space,
+    // so it always faces the camera and is never shadowed. Editor-only (skipped in
+    // fullscreen / the standalone play process, which never calls updateGizmo).
+    std::vector<std::pair<glm::vec2, glm::vec4>> lightIcons;
+    if (!m_window->isFullscreen()) {
+        auto& lp = m_registry.pool<LightComponent>();
+        for (size_t i = 0; i < lp.size(); ++i) {
+            if (lp[i].type != LightComponent::Type::Point) continue;
+            Entity e = lp.getEntity(i);
+            if (!m_registry.has<TransformComponent>(e)) continue;
+            glm::vec3 wp = glm::vec3(m_registry.get<TransformComponent>(e).worldMatrix[3]);
+            glm::vec2 s;
+            if (worldToScreen(wp, vp, winW, winH, s))
+                lightIcons.push_back({ s, glm::vec4(lp[i].color, 1.0f) });
+        }
+    }
+
+    m_gizmo.update(m_gizmoVisible, m_gizmoOrigin, m_gizmoTip, hoverAxis, marqueeActive, mq0, mq1, outlines, lightIcons);
 }
 
 void Engine::buildDemoScene() {
@@ -1999,6 +2267,42 @@ void Engine::spawnModel(const std::string& path, const glm::vec3& position) {
         m_hierarchy.setSelection({created});   // fires onSelect → m_selectedEntity
         LOG_INFO("Spawned '{}' as entity {}", std::filesystem::path(path).filename().string(), created);
     }
+}
+
+void Engine::createCubeEntity() {
+    Mesh* mesh = resolveMesh("prim:cube");
+    if (!mesh) { LOG_WARN("createCubeEntity: cube mesh unavailable"); return; }
+    glm::vec3 pos = entitiesPivot({});         // a point in front of the camera
+    Entity e = createMeshEntity(mesh, m_resourceCache.getDefaultTexture(), pos,
+                                {1,1,1}, {1,1,1,1}, 0.0f, 0.5f, "prim:cube");
+    pushSpawnAction({e});                       // one Ctrl+Z removes it
+    m_hierarchy.setSelection({e});
+    LOG_INFO("Created cube (entity {})", e);
+}
+
+void Engine::createLightEntity(bool directional) {
+    Entity e = m_registry.createEntity();
+    LightComponent lc{};
+    if (directional) {
+        lc.type      = LightComponent::Type::Directional;
+        lc.color     = {1.0f, 1.0f, 0.95f};
+        lc.intensity = 1.0f;
+        lc.direction = glm::normalize(glm::vec3(-0.5f, -1.0f, -0.3f));
+        m_registry.assign<LightComponent>(e, lc);
+    } else {
+        TransformComponent tc{};
+        tc.position = entitiesPivot({});        // in front of the camera
+        m_registry.assign<TransformComponent>(e, tc);
+        lc.type      = LightComponent::Type::Point;
+        lc.color     = {1.0f, 0.9f, 0.7f};
+        lc.intensity = 2.0f;
+        lc.radius    = 8.0f;
+        m_registry.assign<LightComponent>(e, lc);
+        ensurePointLightGizmo(e);               // visible sphere marker + tinted material
+    }
+    pushSpawnAction({e});
+    m_hierarchy.setSelection({e});
+    LOG_INFO("Created {} light (entity {})", directional ? "directional" : "point", e);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

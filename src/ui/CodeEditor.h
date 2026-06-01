@@ -28,6 +28,7 @@ class VulkanContext;
 class CodeEditor {
 public:
     static constexpr float TABBAR_H = 22.0f;
+    static constexpr float VIEW_BTN_W = 26.0f;   // editor⇄scene toggle at the right of the tab bar
     static constexpr uint32_t VERT_CAP = 131072;
 
     void init(VulkanContext& context, GLFWwindow* window,
@@ -49,9 +50,15 @@ public:
 
     bool hasDocs()   const { return !m_docs.empty(); }
     bool isVisible() const { return m_visible && !m_docs.empty(); }
+    // True while the cursor is over a tab's close 'x'. Engine OR's this with
+    // the other panels' wantsPointerCursor flags to swap to the hand cursor.
+    bool wantsPointerCursor() const { return m_overButton; }
     void setVisible(bool v) { m_visible = v; }
     void setFocused(bool f) { if (m_focused != f) { m_focused = f; m_dirty = true; } }
-    bool isFocused() const { return m_focused && isVisible() && activeIsText(); }
+    bool isFocused() const { return m_focused && isVisible() && activeIsText() && !m_showScene; }
+    // True when the tab bar is up but its body is hidden to reveal the 3D scene
+    // behind it (the editor⇄scene toggle is on). Only meaningful with tabs open.
+    bool showingScene() const { return m_showScene && isVisible(); }
     bool activeIsImage()    const;
     bool activeIsMaterial() const;
 
@@ -95,8 +102,10 @@ private:
     ImagePipeline*           m_imgPipeline = nullptr;
     MaterialPreviewPipeline* m_matPipeline = nullptr;
     VkDescriptorPool         m_descPool  = VK_NULL_HANDLE;
-    bool         m_visible   = true;
-    bool         m_focused   = false;
+    bool         m_visible    = true;
+    bool         m_focused    = false;
+    bool         m_overButton = false;  // re-tested every update() against the tab close 'x' / view toggle
+    bool         m_showScene  = false;  // tab bar shown, body hidden so the 3D viewport shows through
 
     std::vector<Doc> m_docs;
     int              m_active = -1;

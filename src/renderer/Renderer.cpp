@@ -538,6 +538,7 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
             const MeshComponent& mc = meshPool[i];
             if (!mc.mesh) continue;
             if (!registry.has<TransformComponent>(entity)) continue;
+            if (registry.has<LightComponent>(entity)) continue;   // light gizmo → drawn as a screen icon, not geometry
 
             const bool isCutout  = registry.has<MaterialComponent>(entity)
                                 && registry.get<MaterialComponent>(entity).alphaCutoff > 0.0f;
@@ -573,6 +574,7 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
 
         if (!mc.mesh) continue;
         if (!registry.has<TransformComponent>(entity)) continue;
+        if (registry.has<LightComponent>(entity)) continue;   // light gizmo → drawn as a screen icon, not geometry
 
         const TransformComponent& tc = registry.get<TransformComponent>(entity);
 

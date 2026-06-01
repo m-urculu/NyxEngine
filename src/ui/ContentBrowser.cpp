@@ -397,11 +397,11 @@ float ContentBrowser::projLabelWidth() const {
     return (float)m_projectName.size() * PixelFont::ADVANCE * PixelFont::SCALE - PixelFont::SCALE;
 }
 
-// Toolbar icons sit just left of the project name: [New File][New Folder] then the name.
+// Toolbar icons sit on the right, just left of the collapse toggle:
+// [New File][New Folder][◀]. The project title is centered separately (see draw()).
 float ContentBrowser::toolButtonX(bool folder, float pw) const {
-    float projLeft = pw - TOGGLE_W - projLabelWidth();
-    float folderX  = projLeft - TOOL_GAP - TOOL_BTN_W;   // New Folder = closest to the name
-    return folder ? folderX : folderX - TOOL_BTN_W;      // New File to its left
+    float folderX = pw - TOGGLE_W - TOOL_GAP - TOOL_BTN_W;   // New Folder = closest to the toggle
+    return folder ? folderX : folderX - TOOL_BTN_W;          // New File to its left
 }
 
 void ContentBrowser::setProject(const std::string& path) {
@@ -867,9 +867,15 @@ void ContentBrowser::update(float windowWidth, float windowHeight, bool cursorAc
             addPlus(folderX + 14.0f, iconY + 5.0f, 3.0f, plusCol);
         }
 
+        // Project title — centered in the gap between the FILE button (left) and
+        // the New File / New Folder toolbar group (right).
         std::string proj = m_projectName;
         std::transform(proj.begin(), proj.end(), proj.begin(), [](unsigned char ch){ return (char)std::toupper(ch); });
-        addText(pw - TOGGLE_W - projLabelWidth(), hy, proj, fsz, nameCol, pw - TOGGLE_W);
+        float titleLeft  = FILE_BTN_W;
+        float titleRight = toolButtonX(false, pw);   // left edge of the New File button
+        float titleX = titleLeft + std::floor((titleRight - titleLeft - projLabelWidth()) * 0.5f);
+        if (titleX < titleLeft) titleX = titleLeft;  // narrow dock: don't slide under FILE
+        addText(titleX, hy, proj, fsz, nameCol, titleRight);   // clip so it never overlaps the tool buttons
 
         bool tHover = cursorActive && mx >= pw - TOGGLE_W && mx < pw
                       && my >= TOP_OFFSET && my < TOP_OFFSET + HEADER_H;

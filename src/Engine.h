@@ -67,6 +67,13 @@ public:
     void init(StatusFn onStatus = {});
     void run();
 
+    // Boot as the standalone game/play process instead of the editor. Called from
+    // main() before init() when the exe is launched with `--play <scene>`. In game
+    // mode the engine loads the given scene, hides all editor chrome, runs a
+    // minimal free-fly loop (ESC quits), and never writes the scene back to disk
+    // (so playing is non-destructive). projectPath sets the content root.
+    void setGameMode(const std::string& scenePath, const std::string& projectPath);
+
 private:
     std::unique_ptr<Window> m_window;
     VulkanContext            m_vulkanContext;
@@ -97,6 +104,16 @@ private:
     };
     PendingCameraPose        m_pendingCameraPose;
 
+    // Debounced in-session camera-pose autosave (editor.prefs). The destructor
+    // saves on a clean exit, but this flushes the pose ~0.8s after the camera
+    // settles so it also survives a crash / kill. Seeded with the loaded pose so
+    // launch itself doesn't trigger a write.
+    glm::vec3 m_lastSavedCamPos{0.0f};
+    float     m_lastSavedCamYaw   = 0.0f;
+    float     m_lastSavedCamPitch = 0.0f;
+    float     m_lastSavedCamFov   = 0.0f;
+    float     m_prefsSaveCountdown = -1.0f;   // <=0 idle; >0 counting down to a save
+
     // Window position parsed from editor.prefs before the window is created.
     // Size is fed straight into the Window ctor (so the swapchain comes up at the
     // right resolution); position is applied via Window::setPosition right after
@@ -120,6 +137,24 @@ private:
 
     // Active project root (content lives under here; the engine source does not).
     std::string m_projectPath = "projects/Sandbox";
+
+    // ── Play mode ───────────────────────────────────────────────────────────
+    // The editor's Play button launches a SEPARATE process (this same exe with
+    // `--play`) that renders the scene standalone in its own window — crash-
+    // isolated from the editor, and instant to iterate (no second swapchain in
+    // the editor's render loop). m_gameMode is true only in that child process.
+    bool        m_gameMode        = false;
+    std::string m_gameScenePath;          // scene the child loads (game mode only)
+    std::string m_gameProjectPath;        // content root for the child (game mode only)
+    void        runGame();                // minimal standalone loop (game mode)
+
+    // Editor side: spawn / terminate / poll the child game process. m_playProcess
+    // holds the Win32 process HANDLE (void* so Engine.h stays windows.h-free).
+    void* m_playProcess = nullptr;
+    void  launchPlay();                   // save scene, then spawn the game process
+    void  stopPlay();                     // terminate the running game process
+    void  updatePlayProcess();            // per-frame: detect the child exiting
+    bool  isPlayRunning() const { return m_playProcess != nullptr; }
 
     // Editor selection (Scene Hierarchy → Inspector). Right dock has a runtime
     // width — user drags its inner (left) edge to resize. Clamped to a sensible
@@ -148,6 +183,8 @@ private:
     // ── Viewport picking + translation gizmo ───────────────────────────────────
     void   updateGizmo(float winW, float winH, bool cursorActive);  // per-frame: geometry + drag
     void   onViewportPress(double mx, double my);                   // viewport left-click: gizmo grab or pick
+    void   onViewportRightClick(double mx, double my);              // viewport right-click → scene context menu
+    bool   cursorOverViewport(double mx, double my) const;          // true when the 3D scene is visible under the cursor
     Entity pickEntity(double mx, double my, float winW, float winH);// ray-cast nearest mesh
 
     bool       m_gizmoVisible = false;          // last frame's gizmo screen geometry (for hit-test)
@@ -256,6 +293,11 @@ private:
     // Add a model file (.obj/.gltf/.glb) to the scene as one or more entities,
     // selecting the (first) new entity. Used by drag-from-content-browser.
     void  spawnModel(const std::string& path, const glm::vec3& position = {0,0,0});
+
+    // Hierarchy right-click "Create" commands. Each spawns one entity in front of
+    // the camera, registers a Spawn undo action, and selects it.
+    void  createCubeEntity();
+    void  createLightEntity(bool directional);   // true = directional (sun), false = point
 
     // Entity clipboard commands acting on the Scene Hierarchy's current selection.
     void  deleteSelection();

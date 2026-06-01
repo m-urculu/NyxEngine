@@ -52,12 +52,21 @@ public:
     static void setUndoCallback(std::function<void()> cb) { s_onUndo = std::move(cb); }
     static void setRedoCallback(std::function<void()> cb) { s_onRedo = std::move(cb); }
 
+    // Ctrl+G — group the currently-selected entities under a new empty parent.
+    // Routed when neither the editor nor the browser has focus.
+    static void setGroupSelectedCallback(std::function<void()> cb) { s_onGroupSelected = std::move(cb); }
+
     // Left-click that fell through every panel to the 3D viewport (x,y in pixels):
     // the Engine uses it to grab a gizmo axis or ray-pick an object.
     static void setViewportPressCallback(std::function<void(double, double)> cb) { s_onViewportPress = std::move(cb); }
 
     // Scroll wheel that fell through every panel to the 3D viewport → camera zoom.
     static void setViewportZoomCallback(std::function<void(double)> cb) { s_onViewportZoom = std::move(cb); }
+
+    // Right-CLICK (press + release without a drag) that fell through to the 3D
+    // viewport → Engine opens the scene context menu. A right-DRAG is still
+    // camera look and never fires this.
+    static void setViewportRightClickCallback(std::function<void(double, double)> cb) { s_onViewportRightClick = std::move(cb); }
 
     // Left-press that lands on the right-dock's resize edge → Engine starts a
     // drag. Routed BEFORE the hierarchy/inspector dispatch so the click doesn't
@@ -93,8 +102,14 @@ private:
     static std::function<void()> s_onSaveScene;
     static std::function<void()> s_onUndo;
     static std::function<void()> s_onRedo;
+    static std::function<void()> s_onGroupSelected;
     static std::function<void(double, double)> s_onViewportPress;
     static std::function<void(double)> s_onViewportZoom;
+    static std::function<void(double, double)> s_onViewportRightClick;
+    // Right-press bookkeeping so a release without movement = a click (menu),
+    // while a release after movement = a camera-look drag (no menu).
+    static double s_rightPressX, s_rightPressY;
+    static bool   s_rightPressPending;
     static std::function<bool()> s_onRightDockResize;
     static std::function<bool()> s_onHierSplitResize;
     static std::function<void()> s_onToggleRightDock;

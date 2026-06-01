@@ -19,7 +19,9 @@ namespace Nyx {
 
 class TitleBar {
 public:
-    static constexpr float BAR_HEIGHT    = 32.0f;
+    // OS title bar is drawn outside the client area now, so the engine
+    // content starts at y=0 — no in-engine title-bar offset needed.
+    static constexpr float BAR_HEIGHT    = 0.0f;
     static constexpr float BUTTON_WIDTH  = 46.0f;
     static constexpr float RESIZE_BORDER = 6.0f;
     static constexpr int   MIN_WIDTH     = 320;
@@ -47,7 +49,8 @@ public:
     // fpsRightInset shifts the right-aligned FPS overlay left by this many pixels so
     // it floats over the 3D viewport instead of under the right-hand dock.
     void update(float windowWidth, float windowHeight, bool cursorActive, float dt,
-                uint32_t frameIndex = 0, float fpsRightInset = 0.0f);
+                uint32_t frameIndex = 0, float fpsRightInset = 0.0f, float leftInset = 0.0f,
+                float topInset = 0.0f);
 
     // Record draw commands into the given command buffer. The caption (bar, logo,
     // buttons) and the FPS overlay are separate sub-draws so the renderer can put
@@ -70,20 +73,40 @@ public:
     void applyCursor(int glfwShape);   // 0 = default arrow
 
     // True when the cursor is over one of the title-bar buttons (min/max/close)
-    // — Engine uses this to switch to the hand cursor over clickable chrome.
-    bool wantsPointerCursor() const { return m_hoverZone != HoverZone::None && m_hoverZone != HoverZone::Bar; }
+    // or the Play/Stop button — Engine uses this to switch to the hand cursor
+    // over clickable chrome.
+    bool wantsPointerCursor() const {
+        return (m_hoverZone != HoverZone::None && m_hoverZone != HoverZone::Bar) || m_playHover;
+    }
+
+    // ── Play/Stop toolbar ───────────────────────────────────────────────────
+    // A small button floating at the top-center of the 3D viewport. The editor
+    // wires setOnPlayToggle() to launch / stop the standalone game process and
+    // calls setPlayRunning() each frame so the icon reflects the child's state.
+    // The button is built into the overlay (FPS) draw range so it stays visible
+    // even though the in-engine caption is hidden when the OS draws the title
+    // bar. When no toggle callback is set (the game/play process itself), the
+    // button is not drawn or hit-tested.
+    void setOnPlayToggle(std::function<void()> cb) { m_onPlayToggle = std::move(cb); }
+    void setPlayRunning(bool running) { m_playRunning = running; }
 
     // True when the title bar is consuming mouse input (dragging, resizing, hovering)
     bool consumesMouse() const;
 
     void setVisible(bool visible) { m_visible = visible; }
     bool isVisible() const { return m_visible; }
+    // Hide just the caption (logo, "Nyx Engine" text, min/max/close buttons)
+    // while keeping the FPS overlay rendering. Used when the OS draws the
+    // title bar but we still want the FPS readout.
+    void setCaptionVisible(bool v) { m_captionVisible = v; }
+    bool isCaptionVisible() const { return m_captionVisible; }
     bool isResizing() const { return m_resizing; }
 
 private:
     GLFWwindow*  m_window    = nullptr;
     VmaAllocator m_allocator = VK_NULL_HANDLE;
-    bool         m_visible   = true;
+    bool         m_visible        = true;
+    bool         m_captionVisible = true;
 
     // Geometry buffers — one set per in-flight frame so re-uploading each frame
     // doesn't clobber a buffer the GPU is still reading (must match
@@ -124,7 +147,18 @@ private:
     // Current window dimensions (cached from update)
     float m_windowWidth  = 0.0f;
     float m_fpsRightInset = 0.0f;   // px to pull the FPS overlay left of the right dock
+    float m_leftInset     = 0.0f;   // viewport left edge (content-browser width) for centering the play button
+    float m_topInset      = 0.0f;   // px to push the play button + FPS overlay below the editor tab bar
     float m_windowHeight = 0.0f;
+
+    // Play/Stop button state. Rect is recomputed each update() (centered over the
+    // viewport); m_playHover drives the hover highlight + pointer cursor.
+    std::function<void()> m_onPlayToggle;            // unset in the game/play process
+    bool  m_playRunning = false;                     // child game process alive → show Stop
+    bool  m_playHover   = false;
+    float m_playX = 0.0f, m_playY = 0.0f, m_playW = 38.0f, m_playH = 24.0f;
+    void  buildPlayButton();
+    bool  hitTestPlay(double mx, double my) const;
 
     // FPS overlay state — ring buffer of recent per-frame FPS + a smoothed value
     // for the numeric readout.
@@ -145,6 +179,9 @@ private:
 
     // Helpers
     void addQuad(float x, float y, float w, float h, const glm::vec4& color);
+    // Solid (shape 0) triangle from three points — used for the play glyph.
+    void addTriangle(const glm::vec2& a, const glm::vec2& b, const glm::vec2& c,
+                     const glm::vec4& color);
     // Emit one quad (centered at cx,cy, half-extents halfW/halfH including AA
     // padding) whose pixels are shaded by an SDF shape — see ui.frag for the
     // data0/data1 layout.

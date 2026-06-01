@@ -15,7 +15,7 @@ void Camera::init(glm::vec3 position, float aspectRatio) {
     updateVectors();
 }
 
-void Camera::update(float deltaTime) {
+void Camera::update(float deltaTime, const glm::vec3& flyPivot) {
     // Rotation is handled by orbit() (middle-mouse drag); update() only flies the
     // camera with WASD. Suppressed while a sub-window (editor/hierarchy/content
     // browser/console) holds focus, so panel shortcuts don't also fly the camera.
@@ -27,7 +27,11 @@ void Camera::update(float deltaTime) {
     if (Input::isKeyDown(GLFW_KEY_LEFT_CONTROL) || Input::isKeyDown(GLFW_KEY_RIGHT_CONTROL))
         return;
 
-    float velocity = m_speed * deltaTime;
+    // Fly speed scales with distance to the focus pivot: zoomed in close → slow
+    // and precise, zoomed/pulled out far → fast. Clamped to a usable band.
+    float dist     = glm::length(flyPivot - m_position);
+    float flySpeed = std::clamp(dist * m_flySpeedPerDist, m_minFlySpeed, m_maxFlySpeed);
+    float velocity = flySpeed * deltaTime;
 
     if (Input::isKeyDown(GLFW_KEY_W)) m_position += m_front * velocity;
     if (Input::isKeyDown(GLFW_KEY_S)) m_position -= m_front * velocity;

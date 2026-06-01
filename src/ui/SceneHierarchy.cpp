@@ -5,6 +5,7 @@
 #include "ecs/components/LightComponent.h"
 #include "ecs/components/EnvironmentComponent.h"
 #include "ecs/components/TransformComponent.h"
+#include "ecs/components/NameComponent.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,16 +31,17 @@ void SceneHierarchy::cleanup(VmaAllocator allocator) {
     }
 }
 
-// Union the Mesh / Light / Transform pools into a de-duplicated, id-sorted list,
-// and drop any selected/anchor entities that no longer exist.
+// Build a tree of rows: roots (parent == NULL_ENTITY) first, then their children
+// recursively if the parent is in m_expandedGroups. Order within each sibling band
+// follows m_order (the manual drag-reorder); Environment is pinned to the top.
 void SceneHierarchy::buildRows(Registry& reg) {
     m_rows.clear();
     std::unordered_set<Entity> seen;
-    auto consider = [&](Entity e) {
-        if (e == NULL_ENTITY || seen.count(e)) return;
-        seen.insert(e);
+
+    auto makeRow = [&](Entity e, int depth) -> Row {
         Row row{};
         row.entity = e;
+        row.depth  = depth;
         if (reg.has<EnvironmentComponent>(e)) {
             row.kind  = Kind::Environment;
             row.label = "Environment";
@@ -52,11 +54,25 @@ void SceneHierarchy::buildRows(Registry& reg) {
             row.label = "Mesh " + std::to_string(e);
         } else {
             row.kind  = Kind::Other;
-            row.label = "Entity " + std::to_string(e);
+            row.label = "Group " + std::to_string(e);   // empty entity → treat as group
         }
-        m_rows.push_back(std::move(row));
+        // A user-set name overrides the kind-derived default label entirely.
+        if (reg.has<NameComponent>(e)) {
+            const auto& nc = reg.get<NameComponent>(e);
+            if (!nc.name.empty()) row.label = nc.name;
+        }
+        return row;
     };
-    // Environment first so it pins to the top of the list regardless of ID order.
+
+    // Collect every entity that has any of the displayed components, plus build a
+    // parent → children adjacency so we can emit a tree below. consider() is the
+    // single point of de-dup.
+    std::vector<Entity> all;
+    std::unordered_set<Entity> seenAll;
+    auto consider = [&](Entity e) {
+        if (e == NULL_ENTITY || !seenAll.insert(e).second) return;
+        all.push_back(e);
+    };
     auto& envPool = reg.pool<EnvironmentComponent>();
     for (size_t i = 0; i < envPool.size(); ++i) consider(envPool.getEntity(i));
     auto& meshPool = reg.pool<MeshComponent>();
@@ -66,34 +82,70 @@ void SceneHierarchy::buildRows(Registry& reg) {
     auto& tfPool = reg.pool<TransformComponent>();
     for (size_t i = 0; i < tfPool.size(); ++i) consider(tfPool.getEntity(i));
 
-    // Sync the manual order vector with the current entity set: drop missing,
-    // append new ones (in id order) so newly-spawned rows land at the bottom.
+    // Sync manual order vector to current entity set (Environment excluded).
     m_order.erase(std::remove_if(m_order.begin(), m_order.end(),
-                  [&](Entity e) { return !seen.count(e); }), m_order.end());
+                  [&](Entity e) { return !seenAll.count(e); }), m_order.end());
     {
         std::unordered_set<Entity> inOrder(m_order.begin(), m_order.end());
         std::vector<Entity> fresh;
-        for (const Row& r : m_rows)
-            if (r.kind != Kind::Environment && !inOrder.count(r.entity))
-                fresh.push_back(r.entity);
+        for (Entity e : all)
+            if (!reg.has<EnvironmentComponent>(e) && !inOrder.count(e)) fresh.push_back(e);
         std::sort(fresh.begin(), fresh.end());
         for (Entity e : fresh) m_order.push_back(e);
     }
 
-    // Sort rows by manual-order index, with Environment pinned to the top.
+    // parent → children, sorted by m_order index.
+    std::unordered_map<Entity, std::vector<Entity>> children;
+    std::vector<Entity> roots;
+    for (Entity e : all) {
+        Entity p = NULL_ENTITY;
+        if (reg.has<TransformComponent>(e))
+            p = reg.get<TransformComponent>(e).parent;
+        if (p == NULL_ENTITY) roots.push_back(e); else children[p].push_back(e);
+    }
     std::unordered_map<Entity, int> idx;
     idx.reserve(m_order.size());
     for (size_t i = 0; i < m_order.size(); ++i) idx[m_order[i]] = static_cast<int>(i);
-    std::sort(m_rows.begin(), m_rows.end(), [&](const Row& a, const Row& b) {
-        if (a.kind == Kind::Environment && b.kind != Kind::Environment) return true;
-        if (b.kind == Kind::Environment && a.kind != Kind::Environment) return false;
-        return idx[a.entity] < idx[b.entity];
+    auto orderless = [&](Entity a, Entity b) {
+        auto ia = idx.find(a), ib = idx.find(b);
+        int va = ia == idx.end() ? INT_MAX : ia->second;
+        int vb = ib == idx.end() ? INT_MAX : ib->second;
+        return va < vb;
+    };
+    std::sort(roots.begin(), roots.end(), [&](Entity a, Entity b) {
+        // Environment pinned to the top.
+        bool aEnv = reg.has<EnvironmentComponent>(a);
+        bool bEnv = reg.has<EnvironmentComponent>(b);
+        if (aEnv != bEnv) return aEnv;
+        return orderless(a, b);
     });
+    for (auto& [p, kids] : children) std::sort(kids.begin(), kids.end(), orderless);
 
-    // Prune the selection to entities that still exist.
+    // Drop expanded-set entries for entities that no longer exist.
+    for (auto it = m_expandedGroups.begin(); it != m_expandedGroups.end(); ) {
+        if (!seenAll.count(*it)) it = m_expandedGroups.erase(it); else ++it;
+    }
+
+    // Emit rows depth-first.
+    std::function<void(Entity, int)> emit = [&](Entity e, int depth) {
+        if (!seen.insert(e).second) return;
+        Row row = makeRow(e, depth);
+        auto itC = children.find(e);
+        bool hasKids = (itC != children.end() && !itC->second.empty());
+        row.hasChildren = hasKids;
+        row.expanded    = hasKids && m_expandedGroups.count(e) > 0;
+        m_rows.push_back(std::move(row));
+        if (hasKids && m_expandedGroups.count(e) > 0)
+            for (Entity k : itC->second) emit(k, depth + 1);
+    };
+    for (Entity r : roots) emit(r, 0);
+
+    // Prune selection / anchor to entities that still exist (and are visible —
+    // a collapsed-parent's children still exist in the registry, so keep them
+    // selectable through the engine even if not shown).
     m_selected.erase(std::remove_if(m_selected.begin(), m_selected.end(),
-                     [&](Entity e) { return !seen.count(e); }), m_selected.end());
-    if (m_anchor != NULL_ENTITY && !seen.count(m_anchor)) m_anchor = NULL_ENTITY;
+                     [&](Entity e) { return !seenAll.count(e); }), m_selected.end());
+    if (m_anchor != NULL_ENTITY && !seenAll.count(m_anchor)) m_anchor = NULL_ENTITY;
 }
 
 bool SceneHierarchy::isSelected(Entity e) const {
@@ -301,6 +353,9 @@ void SceneHierarchy::update(Registry& registry, float x0, float width, float top
     if (m_scroll < 0.0f)      m_scroll = 0.0f;
 
     const float maxX = x0 + width - 4.0f;
+    constexpr float INDENT_PX  = 12.0f;   // each depth level shifts the row by this much
+    constexpr float CHEVRON_W  = 10.0f;
+    m_chevronHits.clear();
     for (size_t i = 0; i < m_rows.size(); ++i) {
         float ry = listTop + i * ROW_H - m_scroll;
         if (ry + ROW_H <= listTop || ry >= top + height) continue;
@@ -310,13 +365,46 @@ void SceneHierarchy::update(Registry& registry, float x0, float width, float top
         if (isSelected(m_rows[i].entity)) addQuad(x0 + 1.0f, ry, width - 1.0f, ROW_H, m_focused ? selBg : selDim);
         else if (hover)                   addQuad(x0 + 1.0f, ry, width - 1.0f, ROW_H, hoverBg);
 
+        float indent = m_rows[i].depth * INDENT_PX;
+        if (m_rows[i].hasChildren) {
+            // Chevron at the front: ▶ collapsed, ▼ expanded. Reuses addArrow
+            // (mint when hovered for affordance, otherwise the row's text colour).
+            float cx = x0 + 6.0f + indent;
+            float cy = ry + ROW_H * 0.5f;
+            bool chevHover = cursorActive && mx >= cx - 4.0f && mx < cx + CHEVRON_W - 2.0f
+                          && my >= ry && my < ry + ROW_H && my >= listTop;
+            // Always render: rotate ▶ → ▼ by drawing a downward triangle when expanded.
+            // We don't have a "down" arrow primitive, so cheat by drawing a small
+            // ▼ as a 3-pixel triangle quad. Keep it cheap and obviously different
+            // from the closed state.
+            glm::vec4 chColor = chevHover ? glm::vec4{0.42f, 1.0f, 0.66f, 1.0f} : rowTxt;
+            if (m_rows[i].expanded) {
+                addQuad(cx, cy - 1.0f, 6.0f, 2.0f, chColor);
+                addQuad(cx + 1.0f, cy + 1.0f, 4.0f, 1.0f, chColor);
+                addQuad(cx + 2.0f, cy + 2.0f, 2.0f, 1.0f, chColor);
+            } else {
+                addArrow(cx + 3.0f, cy, /*right=*/true, chColor);
+            }
+            m_chevronHits.push_back({m_rows[i].entity, cx - 4.0f, ry, CHEVRON_W + 2.0f, ROW_H});
+        }
+
         const glm::vec4 envIcon{0.42f, 1.00f, 0.66f, 1.0f};   // mint, matches editor accent
         glm::vec4 ic = (m_rows[i].kind == Kind::Environment) ? envIcon
                      : (m_rows[i].kind == Kind::Mesh)        ? meshIcon
                      : (m_rows[i].kind == Kind::Light)       ? lightCol : otherCol;
-        addBall(x0 + 10.0f, ry + ROW_H * 0.5f, 3.5f, ic);
-        addText(x0 + 18.0f, ry + std::floor((ROW_H - PixelFont::CELL_H) * 0.5f),
-                m_rows[i].label, fsz, rowTxt, maxX);
+        addBall(x0 + 10.0f + indent + CHEVRON_W, ry + ROW_H * 0.5f, 3.5f, ic);
+        if (m_rows[i].entity == m_renamingEntity) {
+            // Inline edit: render the buffer with a 1px cursor at the end.
+            float tx = x0 + 18.0f + indent + CHEVRON_W;
+            float ty = ry + std::floor((ROW_H - PixelFont::CELL_H) * 0.5f);
+            const glm::vec4 editCol{1.0f, 1.0f, 1.0f, 1.0f};
+            float endX = addText(tx, ty, m_renameBuffer, fsz, editCol, maxX);
+            addQuad(endX + 1.0f, ty, 1.0f, PixelFont::CELL_H, editCol);
+        } else {
+            addText(x0 + 18.0f + indent + CHEVRON_W,
+                    ry + std::floor((ROW_H - PixelFont::CELL_H) * 0.5f),
+                    m_rows[i].label, fsz, rowTxt, maxX);
+        }
     }
 
     // Drop indicator for the reorder drag — mint 2 px line between rows.
@@ -409,6 +497,15 @@ bool SceneHierarchy::handleMouseButton(int button, int action) {
         return true;
     }
     if (my < m_top + HEADER_H) return true;   // header — consume, no selection
+
+    // Chevron click: flip expanded state for that entity, don't change selection.
+    for (const ChevronHit& h : m_chevronHits) {
+        if (mx >= h.x && mx < h.x + h.w && my >= h.y && my < h.y + h.h) {
+            if (m_expandedGroups.count(h.entity)) m_expandedGroups.erase(h.entity);
+            else                                  m_expandedGroups.insert(h.entity);
+            return true;
+        }
+    }
 
     m_leftDown    = true;
     m_marquee     = false;
@@ -524,13 +621,64 @@ bool SceneHierarchy::handleRightPress() {
     return true;
 }
 
+bool SceneHierarchy::startRename(Entity e, const std::string& initial) {
+    if (e == NULL_ENTITY) return false;
+    m_renamingEntity = e;
+    m_renameBuffer   = initial;
+    m_focused        = true;     // suppress camera + flag this panel as keyboard owner
+    return true;
+}
+
+void SceneHierarchy::commitRename() {
+    if (m_renamingEntity == NULL_ENTITY) return;
+    if (m_onRenameCommit) m_onRenameCommit(m_renamingEntity, m_renameBuffer);
+    m_renamingEntity = NULL_ENTITY;
+    m_renameBuffer.clear();
+}
+
+void SceneHierarchy::cancelRename() {
+    m_renamingEntity = NULL_ENTITY;
+    m_renameBuffer.clear();
+}
+
+void SceneHierarchy::handleChar(unsigned int codepoint) {
+    if (m_renamingEntity == NULL_ENTITY) return;
+    // Ignore control chars (Backspace/Enter come through handleKey).
+    if (codepoint < 0x20 || codepoint == 0x7F) return;
+    // Sub-set to printable ASCII for the pixel font's character set.
+    if (codepoint < 0x80) m_renameBuffer.push_back(static_cast<char>(codepoint));
+}
+
 void SceneHierarchy::openMenu(double mx, double my) {
     m_menuItems.clear();
+
+    // Create — always available, with or without a selection (right-clicking
+    // empty space is the classic "make a new object here" gesture).
+    m_menuItems.push_back({"Create Cube",              Command::CreateCube});
+    m_menuItems.push_back({"Create Point Light",       Command::CreatePointLight});
+    m_menuItems.push_back({"Create Directional Light", Command::CreateDirLight});
+
     bool has = !m_selected.empty();
     if (has) {
+        // Single-selection-only: Rename targets the primary entity.
+        if (m_selected.size() == 1) m_menuItems.push_back({"Rename", Command::Rename});
         m_menuItems.push_back({"Copy",      Command::Copy});
         m_menuItems.push_back({"Cut",       Command::Cut});
         m_menuItems.push_back({"Duplicate", Command::Duplicate});
+        m_menuItems.push_back({"Group",     Command::Group});
+        // "Ungroup" only when the selection contains at least one group — i.e.
+        // an empty-parent row (the build_rows tree labels these "Group N" and
+        // sets row.hasChildren). Avoid offering Ungroup on a meshed entity that
+        // just happens to have children — only the engine knows for sure
+        // because m_rows isn't always in sync with the latest registry, so the
+        // engine's ungroupSelected() filters again before acting.
+        bool anyGroupSelected = false;
+        for (const Row& r : m_rows) {
+            if (r.kind == Kind::Other && r.hasChildren && isSelected(r.entity)) {
+                anyGroupSelected = true; break;
+            }
+        }
+        if (anyGroupSelected) m_menuItems.push_back({"Ungroup", Command::Ungroup});
     }
     m_menuItems.push_back({"Paste", Command::Paste});
     if (has) m_menuItems.push_back({"Delete", Command::Delete});
@@ -548,6 +696,17 @@ void SceneHierarchy::openMenu(double mx, double my) {
     m_menuOpen = true;
 }
 
+void SceneHierarchy::openContextMenuAt(double sx, double sy) {
+    openMenu(sx, sy);   // builds the items, sets m_menuOpen, computes m_menuW
+    // openMenu clamped to the panel; re-clamp to the whole window so the menu can
+    // sit over the 3D viewport (the central area, left of this dock).
+    int ww = 0, wh = 0;
+    glfwGetWindowSize(m_window, &ww, &wh);
+    float mh = m_menuItems.size() * MENU_ROW_H;
+    m_menuX = std::min((float)sx, (float)ww - m_menuW);  if (m_menuX < 0.0f) m_menuX = 0.0f;
+    m_menuY = std::min((float)sy, (float)wh - mh);       if (m_menuY < 0.0f) m_menuY = 0.0f;
+}
+
 bool SceneHierarchy::handleScroll(double yoffset) {
     if (!m_visible) return false;
     double mx = 0.0, my = 0.0;
@@ -562,6 +721,24 @@ bool SceneHierarchy::handleKey(int key, int action, int mods) {
     if (!m_focused || action != GLFW_PRESS) return false;
     if (key == GLFW_KEY_ESCAPE && m_menuOpen) { closeMenu(); return true; }
     bool ctrl = (mods & GLFW_MOD_CONTROL) != 0;
+
+    // Rename mode owns the keyboard while active — Enter commits, Esc cancels,
+    // Backspace erases. Everything else (printables) routes through handleChar.
+    if (m_renamingEntity != NULL_ENTITY) {
+        if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) { commitRename(); return true; }
+        if (key == GLFW_KEY_ESCAPE) { cancelRename(); return true; }
+        if (key == GLFW_KEY_BACKSPACE) {
+            if (!m_renameBuffer.empty()) m_renameBuffer.pop_back();
+            return true;
+        }
+        return true;   // swallow everything else while renaming
+    }
+
+    // F2 starts rename on the primary selection — Maya/Unity standard.
+    if (key == GLFW_KEY_F2 && !m_selected.empty()) {
+        if (m_onCommand) m_onCommand(Command::Rename);
+        return true;
+    }
 
     if (key == GLFW_KEY_DELETE || key == GLFW_KEY_BACKSPACE) {
         if (!m_selected.empty() && m_onCommand) m_onCommand(Command::Delete);
