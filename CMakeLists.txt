@@ -6,6 +6,21 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# ── Distribution / runtime linkage ──────────────────────────────────────────
+# Statically link the C runtime so the shipped exe needs no msvcp140/vcruntime140
+# redistributable on a player's machine (CMP0091 lets CMAKE_MSVC_RUNTIME_LIBRARY
+# select /MT vs /MD). Build the third-party libs (GLFW / spdlog / Assimp / zlib)
+# static too, so there are no loose DLLs to ship — just Nyx.exe + shaders +
+# content. Must be set BEFORE add_subdirectory / FetchContent so the deps inherit
+# it. (vulkan-1.dll is not bundled — it ships with the GPU driver.)
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
 # ── Find Vulkan SDK (must be installed on the system) ───────────────────────
 find_package(Vulkan REQUIRED)
 message(STATUS "Vulkan found: ${Vulkan_INCLUDE_DIRS}")
@@ -172,11 +187,13 @@ if(WIN32 AND MSVC)
     target_link_options(${PROJECT_NAME} PRIVATE /ENTRY:mainCRTStartup)
 endif()
 
-# ── Enable validation layers in Debug builds ────────────────────────────────
+# ── Vulkan validation layers: DEBUG ONLY ────────────────────────────────────
+# Shipping builds must NOT request validation layers: they live in the Vulkan
+# SDK, which players don't have installed, so requesting them throws the
+# "enabledLayerCount" error (and can fail device creation outright). Debug keeps
+# them on for development.
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     $<$<CONFIG:Debug>:ENABLE_VALIDATION_LAYERS>
-    # Always enable for now (easier for learning)
-    ENABLE_VALIDATION_LAYERS
     # glm::perspective/ortho default to OpenGL clip-space depth [-1,1]; Vulkan needs
     # [0,1]. Define this so every projection (camera, shadow, sky) matches what the
     # Vulkan rasterizer writes — required for shadow sampling depth-compare to align.
