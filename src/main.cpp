@@ -20,6 +20,21 @@
 
 namespace {
 
+// The directory the running executable lives in (empty on failure).
+std::filesystem::path exeDirectory() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+#ifdef _WIN32
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return {};
+    return fs::path(std::wstring(buf, n)).parent_path();
+#else
+    fs::path p = fs::read_symlink("/proc/self/exe", ec);
+    return ec ? fs::path{} : p.parent_path();
+#endif
+}
+
 // Resources (shaders/, projects/) are loaded via paths relative to the working
 // directory. Rather than require the app be launched from the project root
 // (which a desktop shortcut or a double-clicked exe won't guarantee), locate the
@@ -28,17 +43,8 @@ namespace {
 void setWorkingDirToProjectRoot() {
     namespace fs = std::filesystem;
     std::error_code ec;
-
-    fs::path start;
-#ifdef _WIN32
-    wchar_t buf[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    start = fs::path(buf).parent_path();
-#else
-    start = fs::read_symlink("/proc/self/exe", ec).parent_path();
-    if (ec) return;
-#endif
+    fs::path start = exeDirectory();
+    if (start.empty()) return;
 
     for (fs::path d = start; ; ) {
         if (fs::exists(d / "shaders", ec) && fs::exists(d / "projects", ec)) {
@@ -88,17 +94,27 @@ LaunchArgs parseArgs(int argc, char** argv) {
     return out;
 }
 
-// A shipped game has a game.cfg next to the exe (written by File > Export Game):
+// A shipped game has a game.cfg NEXT TO THE EXE (written by File > Export Game):
 //   scene   projects/<Name>/scenes/<file>.scene
 //   project projects/<Name>
 // When present (and no explicit --play was given), boot straight into that scene
 // like --play does. This is what turns an exported folder into a double-click game.
+//
+// We look beside the exe (not in the cwd) and chdir there: the exe's own folder
+// IS the content root in an export, and relying on setWorkingDirToProjectRoot()
+// could land the cwd on a different shaders/+projects/ root (e.g. the dev tree
+// if the export sits inside it), which would silently fall back to the editor.
 void readGameConfig(LaunchArgs& la) {
     namespace fs = std::filesystem;
     if (!la.playScene.empty()) return;                 // explicit --play wins
     std::error_code ec;
-    if (!fs::exists("game.cfg", ec)) return;
-    std::ifstream f("game.cfg");
+    fs::path dir = exeDirectory();
+    fs::path cfg = dir / "game.cfg";
+    if (dir.empty() || !fs::exists(cfg, ec)) return;
+    // The exe's folder is the content root — make it the cwd so the config's
+    // relative scene/project paths resolve regardless of where we were launched.
+    fs::current_path(dir, ec);
+    std::ifstream f(cfg);
     std::string line;
     while (std::getline(f, line)) {
         std::istringstream ss(line);

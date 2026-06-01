@@ -3692,6 +3692,20 @@ void Engine::exportGame() {
     LOG_INFO("Export: building '{}' … (copying assets can take a moment)", out.generic_string());
     fs::create_directories(out, ec);
 
+    // 0) game.cfg FIRST (tiny) — its presence is what makes the copied exe boot
+    //    into the game instead of the editor. Writing it before the (potentially
+    //    large/slow) asset copy means an interrupted export still produces a folder
+    //    recognised as a game, not one that silently opens the editor. Path is
+    //    relative to the export root.
+    {
+        std::string sceneRel = fs::relative(m_currentScenePath, m_projectPath, ec).generic_string();
+        if (ec || sceneRel.empty() || sceneRel.rfind("..", 0) == 0) sceneRel = "scenes/scene.scene";
+        ec.clear();
+        std::ofstream cfg(out / "game.cfg");
+        cfg << "scene projects/"   << projName << "/" << sceneRel << "\n";
+        cfg << "project projects/" << projName << "\n";
+    }
+
     // 1) The running executable. Export from the RELEASE build for a shippable
     //    game — a Debug exe requests Vulkan validation layers a player won't have.
     {
@@ -3722,17 +3736,6 @@ void Engine::exportGame() {
     fs::remove_all(projDst / "scenes" / ".history", ec);   ec.clear();
     fs::remove(projDst / "editor.prefs", ec);              ec.clear();
     fs::remove(projDst / "scenes" / "scene.scene.bak", ec); ec.clear();
-
-    // 4) game.cfg — its presence makes the copied exe boot straight into the
-    //    scene (no editor). Path is relative to the export root.
-    std::string sceneRel = fs::relative(m_currentScenePath, m_projectPath, ec).generic_string();
-    if (ec || sceneRel.empty() || sceneRel.rfind("..", 0) == 0) sceneRel = "scenes/scene.scene";
-    ec.clear();
-    {
-        std::ofstream cfg(out / "game.cfg");
-        cfg << "scene projects/"   << projName << "/" << sceneRel << "\n";
-        cfg << "project projects/" << projName << "\n";
-    }
 
     LOG_INFO("Export: done → {}  (double-click {}.exe to play)",
              out.generic_string(), projName);
