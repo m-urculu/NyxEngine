@@ -15,3 +15,25 @@ cmake-build-*/
 # OS
 .DS_Store
 Thumbs.db
+
+# Runtime + test logs
+*.log
+
+# Debug / scratch screenshots
+snap_*.png
+snap_*.jpg
+pbr2.png
+pbr3.png
+
+# Scene backups + per-project editor undo history
+*.bak
+projects/*/scenes/.history/
+
+# Large per-project asset trees (kept local — too big for git)
+projects/*/assets/
+
+# Compiled dev-tool binaries (sources are tracked under tools/)
+tools/*.exe
+
+# Stray editor workspace file
+*.code-workspace
