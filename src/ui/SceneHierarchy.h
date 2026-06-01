@@ -48,6 +48,8 @@ public:
     bool handleScroll(double yoffset);
     bool handleKey(int key, int action, int mods);     // Del / Ctrl+C/X/V/A when focused
     bool menuOpen() const { return m_menuOpen; }
+    // Dismiss this panel's context menu (the app keeps only one menu open at a time).
+    void closeContextMenu() { closeMenu(); }
 
     // Primary (last-selected) entity → Inspector. Fires on any primary change.
     void setSelectCallback(std::function<void(Entity)> cb)  { m_onSelect  = std::move(cb); }

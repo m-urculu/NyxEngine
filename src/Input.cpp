@@ -212,24 +212,29 @@ void Input::mouseButtonCallback([[maybe_unused]] GLFWwindow* window, int button,
     // other panels would leave the typed value unsaved when the focus shifts.
     if (s_inspector) s_inspector->commitTextEditOnExternalClick();
 
-    // Right-press → content browser context menu. If it lands on the panel, the
-    // menu opens, the tree takes keyboard focus, and camera look is suppressed.
+    // Right-press → a context menu. Only ONE menu is allowed open app-wide, so
+    // opening one (or starting a viewport right-click) first dismisses any other.
     if (button == GLFW_MOUSE_BUTTON_RIGHT) {
         if (s_contentBrowser && s_contentBrowser->handleRightPress()) {
+            if (s_hierarchy) s_hierarchy->closeContextMenu();   // close the scene/viewport menu
             s_lookSuppressed = true;
             s_contentBrowser->setFocused(true);
             if (s_hierarchy) s_hierarchy->setFocused(false);
             if (s_editor)    s_editor->setFocused(false);
         } else if (s_hierarchy && s_hierarchy->handleRightPress()) {
+            if (s_contentBrowser) s_contentBrowser->closeContextMenu();   // close the file-browser menu
             s_lookSuppressed = true;
             s_hierarchy->setFocused(true);
             if (s_contentBrowser) s_contentBrowser->setFocused(false);
             if (s_editor)         s_editor->setFocused(false);
             if (s_console)        s_console->setFocused(false);
         } else {
-            // Fell through to the viewport (or a menu-less panel). Remember the
-            // press; if the cursor barely moves before release it's a click and
-            // the Engine opens the scene context menu (a drag is camera look).
+            // Fell through to the viewport (or a menu-less panel). Dismiss any open
+            // menu now, and remember the press: if the cursor barely moves before
+            // release it's a click and the Engine opens the scene context menu (a
+            // drag is camera look, which opens nothing).
+            if (s_contentBrowser) s_contentBrowser->closeContextMenu();
+            if (s_hierarchy)      s_hierarchy->closeContextMenu();
             s_rightPressPending = true;
             glfwGetCursorPos(window, &s_rightPressX, &s_rightPressY);
         }

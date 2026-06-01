@@ -52,6 +52,8 @@ public:
     bool handleKey(int key, int action, int mods);       // true if consumed
     bool capturesKeyboard() const { return m_renaming; }  // suppresses camera WASD while naming
     bool menuOpen() const { return m_menuOpen; }
+    // Dismiss this panel's context menu (the app keeps only one menu open at a time).
+    void closeContextMenu() { closeMenu(); }
 
     // Keyboard focus for the file tree: when focused, Ctrl+C/X/V/Z act on the
     // selected row. The Engine clears it when another panel/the viewport is clicked.
