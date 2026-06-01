@@ -3656,7 +3656,7 @@ void Engine::saveProjectAs() {
     switchProject(dest.generic_string());
 }
 
-void Engine::exportGame() {
+void Engine::exportGame(const std::string& destParentArg) {
     namespace fs = std::filesystem;
     std::error_code ec;
 
@@ -3667,9 +3667,11 @@ void Engine::exportGame() {
     std::string projName = fs::path(m_projectPath).filename().string();
     if (projName.empty()) projName = "Game";
 
-    // Pick a destination parent; we create <dest>/<projName>/ inside it.
-    std::string destParent = m_window->openFolderDialog(
-        "Export Game — pick a destination folder", "");
+    // Pick a destination parent; we create <dest>/<projName>/ inside it. A caller
+    // may pass one directly (e.g. the --export CLI path); otherwise ask the user.
+    std::string destParent = destParentArg.empty()
+        ? m_window->openFolderDialog("Export Game — pick a destination folder", "")
+        : destParentArg;
     if (destParent.empty()) return;   // cancelled
 
     fs::path out = fs::path(destParent) / projName;
@@ -3730,6 +3732,11 @@ void Engine::exportGame() {
     //    references use (projects/<name>/…) so nothing needs rewriting. Then prune
     //    the editor-only bits (undo history, prefs, scene backups).
     fs::path projDst = out / "projects" / projName;
+    // fs::copy does NOT create intermediate parents — make the full destination
+    // path first, then copy the project's contents into it. (Without this the copy
+    // failed with "cannot find the path specified", which left the export with no
+    // game content — and, in the old ordering, no game.cfg → it opened the editor.)
+    fs::create_directories(projDst, ec); ec.clear();
     fs::copy(m_projectPath, projDst,
              fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
     if (ec) { LOG_ERROR("Export: copy project failed: {}", ec.message()); return; }

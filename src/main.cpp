@@ -61,7 +61,7 @@ void setWorkingDirToProjectRoot() {
 // When --play is present the exe boots as the standalone game/play process the
 // editor spawns when you hit Play, rather than as the editor itself. On Windows
 // we read the wide command line so non-ASCII project paths survive.
-struct LaunchArgs { std::string playScene; std::string playProject; };
+struct LaunchArgs { std::string playScene; std::string playProject; std::string exportDest; };
 
 LaunchArgs parseArgs(int argc, char** argv) {
     LaunchArgs out;
@@ -81,6 +81,7 @@ LaunchArgs parseArgs(int argc, char** argv) {
             std::wstring a = wargv[i];
             if      (a == L"--play"    && i + 1 < wargc) out.playScene   = toUtf8(wargv[++i]);
             else if (a == L"--project" && i + 1 < wargc) out.playProject = toUtf8(wargv[++i]);
+            else if (a == L"--export"  && i + 1 < wargc) out.exportDest  = toUtf8(wargv[++i]);
         }
         LocalFree(wargv);
     }
@@ -89,6 +90,7 @@ LaunchArgs parseArgs(int argc, char** argv) {
         std::string a = argv[i];
         if      (a == "--play"    && i + 1 < argc) out.playScene   = argv[++i];
         else if (a == "--project" && i + 1 < argc) out.playProject = argv[++i];
+        else if (a == "--export"  && i + 1 < argc) out.exportDest  = argv[++i];
     }
 #endif
     return out;
@@ -134,26 +136,29 @@ int main(int argc, char** argv) {
 
     LaunchArgs la = parseArgs(argc, argv);
     readGameConfig(la);                                // exported build → boot the game
-    const bool gameMode = !la.playScene.empty();
+    const bool gameMode   = !la.playScene.empty();
+    const bool exportMode = !gameMode && !la.exportDest.empty();  // headless: export then exit
+    const bool showSplash = !gameMode && !exportMode;
 
     // Splash first (editor only) — shown before any heavy work so the user sees
     // something immediately after double-clicking the exe. The game process boots
     // straight into the scene with no splash.
     Nyx::Splash splash;
-    if (!gameMode) splash.show();
+    if (showSplash) splash.show();
 
     try {
         Nyx::Engine engine;
         if (gameMode) engine.setGameMode(la.playScene, la.playProject);
 
         Nyx::Engine::StatusFn statusCb;
-        if (!gameMode) statusCb = [&](const std::string& s, float p){ splash.setStatus(s, p); };
+        if (showSplash) statusCb = [&](const std::string& s, float p){ splash.setStatus(s, p); };
         engine.init(statusCb);
 
-        if (!gameMode) splash.close();
+        if (showSplash) splash.close();
+        if (exportMode) { engine.exportGame(la.exportDest); return EXIT_SUCCESS; }
         engine.run();
     } catch (const std::exception& e) {
-        if (!gameMode) splash.close();
+        if (showSplash) splash.close();
         // If anything goes wrong, print the error
         std::cerr << "FATAL ERROR: " << e.what() << std::endl;
         return EXIT_FAILURE;

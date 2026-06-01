@@ -74,6 +74,13 @@ public:
     // (so playing is non-destructive). projectPath sets the content root.
     void setGameMode(const std::string& scenePath, const std::string& projectPath);
 
+    // "Export Game" → assemble a self-contained, double-click-to-play folder for
+    // the current project (copy of this exe, compiled shaders, project content,
+    // and a game.cfg that boots the exe straight into the scene). destParent
+    // empty → ask via folder dialog; pass a path for the --export CLI flow.
+    // Public so main()'s --export path can drive it headlessly.
+    void exportGame(const std::string& destParent = "");
+
 private:
     std::unique_ptr<Window> m_window;
     VulkanContext            m_vulkanContext;
@@ -320,12 +327,6 @@ private:
     // a new sibling folder the user picks, then switch to it. Saves the current
     // project first so the copy is up to date.
     void  saveProjectAs();
-
-    // "Export Game" → assemble a self-contained, double-click-to-play folder for
-    // the current project: a copy of this exe, the compiled shaders, the project
-    // content (scenes + assets, minus editor-only history/prefs), and a game.cfg
-    // that makes the copied exe boot straight into the scene (no editor chrome).
-    void  exportGame();
 
     // Undo/redo (Ctrl+Z / Ctrl+Shift+Z): snapshot the whole scene before each mutating
     // action; undo restores the most recent snapshot, redo re-applies it. Covers
