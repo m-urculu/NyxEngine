@@ -14,6 +14,14 @@
 
 namespace Nyx {
 
+// Custom borderless maximize. Bypasses the OS WS_MAXIMIZE state (which
+// inflates the maximize rect by the frame thickness on every side, clipping
+// our UI off-screen) by SetWindowPos-ing the window to the monitor's work area
+// and tracking maximize state internally. Drives the title-bar max button and
+// the Window::isMaximized / maximize methods.
+void toggleCustomMaximize(GLFWwindow* w);
+bool isCustomMaximized(GLFWwindow* w);
+
 class Window {
 public:
     // Create a window with the given title and size
@@ -37,6 +45,17 @@ public:
     int getWidth() const { return m_width; }
     int getHeight() const { return m_height; }
 
+    // Current window position in screen coords (top-left).
+    void getPosition(int& x, int& y) const;
+    // Move the window to a specific screen position.
+    void setPosition(int x, int y);
+    // Maximize state — checked at save time so we can restore via the OS
+    // rather than re-applying the overhang-offset coordinates Windows uses for
+    // maximized windows (which look right while maximized but place the window
+    // off-screen by ~8 px on top-left when restored without re-maximizing).
+    bool isMaximized() const;
+    void maximize();
+
     // True if the window was resized since last check (resets after reading)
     bool wasResized() const { return m_resized; }
     void resetResizedFlag() { m_resized = false; }
@@ -52,14 +71,9 @@ public:
 
     // Native "pick a folder" dialog (Windows). Returns the selected path (forward
     // slashes) or "" if cancelled / unsupported.
-    std::string openFolderDialog(const std::string& title = "Open Folder");
+    std::string openFolderDialog(const std::string& title = "Open Folder",
+                                 const std::string& initialDir = "");
 
-    // Hook called from the WndProc on WM_SIZE / WM_WINDOWPOSCHANGED so the
-    // engine can render mid-drag (Windows blocks the main thread in a modal
-    // resize loop, so glfwPollEvents wouldn't return until release without
-    // this). Engine registers a callback that recreates the swapchain if the
-    // size changed and draws one frame.
-    static void setLiveResizeCallback(std::function<void()> cb);
 
 private:
     GLFWwindow* m_window = nullptr;

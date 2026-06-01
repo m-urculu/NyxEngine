@@ -38,6 +38,12 @@ constexpr int kBarHeight       = 32;       // matches TitleBar::BAR_HEIGHT
 constexpr int kCaptionButtonsW = 46 * 3;   // min / max / close (TitleBar::BUTTON_WIDTH * 3)
 WNDPROC g_prevProc = nullptr;
 
+// Custom maximize state — see the longer comment near enterCustomMaximize for
+// why we bypass the OS WS_MAXIMIZE flag. Declared up here so nyxHitTest (just
+// below) can read it.
+static bool s_customMax = false;
+static RECT s_savedWindowedRect = {};
+
 LRESULT nyxHitTest(HWND hwnd, LPARAM lParam) {
     POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
     RECT rc; GetWindowRect(hwnd, &rc);
@@ -45,7 +51,7 @@ LRESULT nyxHitTest(HWND hwnd, LPARAM lParam) {
     int w = rc.right - rc.left, h = rc.bottom - rc.top;
     const int B = 6;  // resize-border thickness
 
-    if (!IsZoomed(hwnd)) {                       // edges only when not maximized
+    if (!IsZoomed(hwnd) && !s_customMax) {       // edges only when not maximized
         bool l = x < B, r = x >= w - B, t = y < B, b = y >= h - B;
         if (t && l) return HTTOPLEFT;    if (t && r) return HTTOPRIGHT;
         if (b && l) return HTBOTTOMLEFT; if (b && r) return HTBOTTOMRIGHT;
@@ -73,11 +79,6 @@ void applyRectRegion(HWND hwnd) {
     SetWindowRgn(hwnd, rgn, TRUE);
 }
 
-// Set by Window::setLiveResizeCallback. Called from the WndProc on resize so
-// the engine paints mid-drag. Plain function pointer/closure is fine — the
-// WndProc only runs on the main thread (same thread that polls events).
-static std::function<void()> s_liveResizeCb;
-
 // Rubber-band resize state. WM_SIZING locks the window at its pre-drag size
 // and tracks the user's proposed rect via a layered overlay window that
 // floats above all others. WM_EXITSIZEMOVE snaps the window to the overlay's
@@ -85,6 +86,43 @@ static std::function<void()> s_liveResizeCb;
 static bool s_inResize    = false;
 static RECT s_lockedRect  = {};
 static RECT s_lastBand    = {};
+// True when WM_ENTERSIZEMOVE fired with the window already maximized — the
+// modal loop that follows is the OS restoring + dragging the window after a
+// title-bar grab, and we want it to proceed natively (no rubber-band lock).
+static bool s_modalFromMax = false;
+
+// Custom maximize implementation. We do NOT use the OS's WS_MAXIMIZE flag
+// because for borderless WS_OVERLAPPEDWINDOW windows the OS maximize inflates
+// the rect by the frame thickness on every side, expecting a native frame to
+// absorb it — which we don't draw, so the overhang clips UI off-screen on
+// every edge. Instead, when "maximize" is requested we save the windowed rect,
+// SetWindowPos to the current monitor's work area, and track the state
+// ourselves (s_customMax above). Restore just SetWindowPos's back to the
+// saved rect.
+
+static void enterCustomMaximize(HWND hwnd) {
+    if (s_customMax) return;
+    GetWindowRect(hwnd, &s_savedWindowedRect);
+    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+    if (!mon || !GetMonitorInfoW(mon, &mi)) return;
+    s_customMax = true;
+    SetWindowPos(hwnd, nullptr,
+                 mi.rcWork.left, mi.rcWork.top,
+                 mi.rcWork.right  - mi.rcWork.left,
+                 mi.rcWork.bottom - mi.rcWork.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+static void exitCustomMaximize(HWND hwnd) {
+    if (!s_customMax) return;
+    s_customMax = false;
+    SetWindowPos(hwnd, nullptr,
+                 s_savedWindowedRect.left, s_savedWindowedRect.top,
+                 s_savedWindowedRect.right  - s_savedWindowedRect.left,
+                 s_savedWindowedRect.bottom - s_savedWindowedRect.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
 
 // Layered overlay updated atomically per frame via UpdateLayeredWindow with a
 // 32-bit DIB. Position, size, AND pixel contents change in a single call so
@@ -181,8 +219,21 @@ LRESULT CALLBACK nyxWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetWindowRect(hwnd, &s_lockedRect);
             s_lastBand = s_lockedRect;
             s_inResize = false;
+            // s_customMax means the window is "maximized" via SetWindowPos to
+            // the work area (no WS_MAXIMIZE flag). On a title-bar drag we exit
+            // custom max in TitleBar before SC_MOVE, so by the time this fires
+            // the modal loop is already over a small window — no rubber-band
+            // lockout needed. The flag still kicks in for the legacy IsZoomed
+            // case in case anything else sets it.
+            s_modalFromMax = IsZoomed(hwnd) != FALSE;
             break;
         case WM_SIZING: {
+            // Drag-from-maximized fires WM_SIZING as Windows restores the
+            // window. Our rubber-band lock would freeze that restore and just
+            // show a mint outline — clearly the wrong UX. Let the OS finish
+            // its restore natively whenever the modal loop began in a
+            // maximized state.
+            if (s_modalFromMax) break;
             // Lock the window at its pre-drag rect by overwriting Windows'
             // proposed rect; track the cursor's real proposed rect via the
             // overlay window so we can snap to it on release.
@@ -194,9 +245,77 @@ LRESULT CALLBACK nyxWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             s_lastBand = proposed;
             return TRUE;
         }
-        case WM_SIZE:
+        case WM_GETMINMAXINFO: {
+            // Tell the OS the maximize rect IS the monitor's work area. Helps
+            // the glfwMaximizeWindow path land the window itself at the work
+            // area. Aero Snap and SC_MAXIMIZE-via-SendMessage paths bypass
+            // this entirely (the WM_NCCALCSIZE clamp below is the safety net
+            // for those).
+            auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
+            HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+            if (mon && GetMonitorInfoW(mon, &mi)) {
+                mmi->ptMaxPosition.x = mi.rcWork.left  - mi.rcMonitor.left;
+                mmi->ptMaxPosition.y = mi.rcWork.top   - mi.rcMonitor.top;
+                mmi->ptMaxSize.x     = mi.rcWork.right  - mi.rcWork.left;
+                mmi->ptMaxSize.y     = mi.rcWork.bottom - mi.rcWork.top;
+                return 0;
+            }
+            break;
+        }
+        case WM_SYSCOMMAND: {
+            // Intercept any OS maximize request (max box, double-click caption,
+            // Win+Up, Aero Snap top) and route through our custom maximize
+            // which SetWindowPos's the window directly to the work area —
+            // bypassing the OS maximize state machine entirely.
+            UINT cmd = static_cast<UINT>(wp) & 0xFFF0;
+            if (cmd == SC_MAXIMIZE) {
+                enterCustomMaximize(hwnd);
+                return 0;
+            }
+            if (cmd == SC_RESTORE && s_customMax) {
+                exitCustomMaximize(hwnd);
+                return 0;
+            }
+            break;
+        }
+        case WM_WINDOWPOSCHANGING: {
+            // Catch any direct-SetWindowPos maximize (Aero Snap, etc.) that
+            // bypasses WM_SYSCOMMAND. Detection: proposed rect overhangs the
+            // work area on ALL FOUR sides — only a maximize produces that.
+            // Rewrite to the work area before commit. Combined with the
+            // WM_SYSCOMMAND intercept above, every maximize path lands at
+            // the work area.
+            auto* wpos = reinterpret_cast<WINDOWPOS*>(lp);
+            if ((wpos->flags & (SWP_NOSIZE | SWP_NOMOVE)) != (SWP_NOSIZE | SWP_NOMOVE)) {
+                RECT cur; GetWindowRect(hwnd, &cur);
+                int x  = (wpos->flags & SWP_NOMOVE) ? cur.left : wpos->x;
+                int y  = (wpos->flags & SWP_NOMOVE) ? cur.top  : wpos->y;
+                int cx = (wpos->flags & SWP_NOSIZE) ? (cur.right  - cur.left) : wpos->cx;
+                int cy = (wpos->flags & SWP_NOSIZE) ? (cur.bottom - cur.top)  : wpos->cy;
+                HMONITOR mon = MonitorFromPoint(POINT{ x + cx/2, y + cy/2 },
+                                                MONITOR_DEFAULTTONEAREST);
+                MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+                if (mon && GetMonitorInfoW(mon, &mi)) {
+                    bool xOver = x < mi.rcWork.left && (x + cx) > mi.rcWork.right;
+                    bool yOver = y < mi.rcWork.top  && (y + cy) > mi.rcWork.bottom;
+                    if (xOver && yOver) {
+                        wpos->x  = mi.rcWork.left;
+                        wpos->y  = mi.rcWork.top;
+                        wpos->cx = mi.rcWork.right  - mi.rcWork.left;
+                        wpos->cy = mi.rcWork.bottom - mi.rcWork.top;
+                        wpos->flags &= ~(SWP_NOSIZE | SWP_NOMOVE);
+                    }
+                }
+            }
+            break;
+        }
+        case WM_SIZE: {
+            LRESULT r = CallWindowProc(g_prevProc, hwnd, msg, wp, lp);
+            applyRectRegion(hwnd);
+            return r;
+        }
         case WM_WINDOWPOSCHANGED: {
-            // Outside the modal resize loop the window can size normally.
             LRESULT r = CallWindowProc(g_prevProc, hwnd, msg, wp, lp);
             applyRectRegion(hwnd);
             return r;
@@ -213,23 +332,29 @@ LRESULT CALLBACK nyxWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                              s_lastBand.bottom - s_lastBand.top,
                              SWP_NOZORDER | SWP_NOACTIVATE);
             }
-            s_inResize = false;
-            if (s_liveResizeCb) s_liveResizeCb();
+            s_inResize     = false;
+            s_modalFromMax = false;
+            // (Live-resize hook moved to enter/exit modal callbacks; this
+            // WndProc is dormant — installNativeChrome is no longer called.)
             break;
         case WM_NCCALCSIZE:
             if (wp == TRUE) {
-                // Client fills the whole window (no native frame). When maximized
-                // the window rect overhangs the monitor by the frame thickness, so
-                // inset the client back to the work area (keeps the taskbar visible
-                // and content un-clipped).
+                // Canonical Chrome/VSCode borderless pattern: when the window
+                // is maximized, clamp the CLIENT rect to the monitor's work
+                // area regardless of the window rect. The overhang NC strip
+                // is invisible (off-screen or behind taskbar) since we draw
+                // no frame. Vulkan's surface sizes off the client area, so
+                // the framebuffer lands on the visible work area exactly.
+                // The WM_SIZE handler above forces NCCALCSIZE to re-run after
+                // WS_MAXIMIZE is set, since on the OS's first call here
+                // IsZoomed is still false during the maximize transition.
+                auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lp);
                 if (IsZoomed(hwnd)) {
-                    auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lp);
-                    int fx = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
-                    int fy = GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
-                    p->rgrc[0].left   += fx;
-                    p->rgrc[0].right  -= fx;
-                    p->rgrc[0].top    += fy;
-                    p->rgrc[0].bottom -= fy;
+                    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                    MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+                    if (mon && GetMonitorInfoW(mon, &mi)) {
+                        p->rgrc[0] = mi.rcWork;
+                    }
                 }
                 return 0;
             }
@@ -293,9 +418,11 @@ Window::Window(const std::string& title, int width, int height)
     // Allow the window to be resized (we'll handle swapchain recreation)
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-    // Borderless window — we draw our own title bar (custom chrome). On native
-    // Win32 the OS still handles focus/activation correctly.
-    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    // Standard OS-decorated window. The OS handles the title bar, maximize
+    // (which goes exactly to the work area, no overhang), Aero Snap, and
+    // drag-from-maximized natively. Our previous custom borderless chrome
+    // had compounding maximize-rect bugs that aren't worth re-fighting.
+    glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
 
     // Create hidden — the splash screen is the user-visible artifact during
     // engine startup; the main window is revealed via Window::show() only once
@@ -316,9 +443,39 @@ Window::Window(const std::string& title, int width, int height)
     // Register the resize callback
     glfwSetFramebufferSizeCallback(m_window, framebufferResizeCallback);
 
+    // No installNativeChrome — we use GLFW's default decorated window now,
+    // so the OS WndProc handles everything itself. See the GLFW_DECORATED hint
+    // above for context.
+
 #ifdef _WIN32
-    // Give the borderless window real OS chrome behavior (Aero Snap, etc.).
-    installNativeChrome(m_window);
+    // Match the OS title bar to the Windows system theme. By default, the
+    // per-app dark-mode flag is off, so the title bar paints white even when
+    // Windows is in dark mode. Read HKCU\...\Personalize\AppsUseLightTheme
+    // (0 = dark, 1 = light) and toggle the DWM immersive-dark-mode attribute
+    // to match.
+    {
+        HWND hwnd = glfwGetWin32Window(m_window);
+        DWORD appsUseLightTheme = 1;
+        DWORD sz = sizeof(appsUseLightTheme);
+        HKEY hKey;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                          L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                          0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            RegQueryValueExW(hKey, L"AppsUseLightTheme", nullptr, nullptr,
+                             reinterpret_cast<LPBYTE>(&appsUseLightTheme), &sz);
+            RegCloseKey(hKey);
+        }
+        BOOL useDark = (appsUseLightTheme == 0) ? TRUE : FALSE;
+        // DWMWA_USE_IMMERSIVE_DARK_MODE was 19 on Win10 build 18362 then renumbered
+        // to 20 on Win10 build 19041+. Try the newer first, fall back to the older.
+        constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE_NEW = 20;
+        constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
+        if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_NEW,
+                                         &useDark, sizeof(useDark)))) {
+            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD,
+                                  &useDark, sizeof(useDark));
+        }
+    }
 #endif
 
     LOG_INFO("Window created: {}x{}", width, height);
@@ -342,6 +499,52 @@ void Window::pollEvents() const {
 
 void Window::show() {
     if (m_window) glfwShowWindow(m_window);
+}
+
+void Window::getPosition(int& x, int& y) const {
+    x = y = 0;
+    if (m_window) glfwGetWindowPos(m_window, &x, &y);
+}
+
+void Window::setPosition(int x, int y) {
+    if (m_window) glfwSetWindowPos(m_window, x, y);
+}
+
+bool Window::isMaximized() const {
+#ifdef _WIN32
+    return s_customMax;
+#else
+    return m_window && glfwGetWindowAttrib(m_window, GLFW_MAXIMIZED) != 0;
+#endif
+}
+
+void Window::maximize() {
+#ifdef _WIN32
+    if (m_window) enterCustomMaximize(glfwGetWin32Window(m_window));
+#else
+    if (m_window) glfwMaximizeWindow(m_window);
+#endif
+}
+
+void toggleCustomMaximize(GLFWwindow* w) {
+#ifdef _WIN32
+    if (!w) return;
+    HWND hwnd = glfwGetWin32Window(w);
+    if (s_customMax) exitCustomMaximize(hwnd);
+    else             enterCustomMaximize(hwnd);
+#else
+    (void)w;
+#endif
+}
+
+bool isCustomMaximized(GLFWwindow* w) {
+#ifdef _WIN32
+    (void)w;
+    return s_customMax;
+#else
+    (void)w;
+    return false;
+#endif
 }
 
 void Window::toggleFullscreen() {
@@ -372,7 +575,8 @@ void Window::toggleFullscreen() {
     }
 }
 
-std::string Window::openFolderDialog(const std::string& title) {
+std::string Window::openFolderDialog(const std::string& title,
+                                     const std::string& initialDir) {
 #ifdef _WIN32
     std::string result;
     HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -383,6 +587,24 @@ std::string Window::openFolderDialog(const std::string& title) {
         if (SUCCEEDED(dlg->GetOptions(&opts))) dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
         std::wstring wtitle(title.begin(), title.end());
         dlg->SetTitle(wtitle.c_str());
+
+        // Open the dialog in initialDir if it's a real directory. SetFolder
+        // wins over the OS's last-used-folder memory, which is what we want
+        // when steering the user to the engine's projects/ root rather than
+        // wherever they last opened a dialog.
+        if (!initialDir.empty()) {
+            std::error_code ec;
+            std::filesystem::path abs = std::filesystem::absolute(initialDir, ec);
+            if (!ec && std::filesystem::exists(abs)) {
+                std::wstring wdir = abs.make_preferred().wstring();
+                IShellItem* folderItem = nullptr;
+                if (SUCCEEDED(SHCreateItemFromParsingName(
+                        wdir.c_str(), nullptr, IID_PPV_ARGS(&folderItem)))) {
+                    dlg->SetFolder(folderItem);
+                    folderItem->Release();
+                }
+            }
+        }
 
         HWND owner = glfwGetWin32Window(m_window);
         if (SUCCEEDED(dlg->Show(owner))) {
@@ -411,13 +633,6 @@ std::string Window::openFolderDialog(const std::string& title) {
 #endif
 }
 
-void Window::setLiveResizeCallback(std::function<void()> cb) {
-#ifdef _WIN32
-    s_liveResizeCb = std::move(cb);
-#else
-    (void)cb;
-#endif
-}
 
 // This is called by GLFW whenever the framebuffer (drawable area) is resized
 void Window::framebufferResizeCallback(GLFWwindow* window, int width, int height) {
