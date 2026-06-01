@@ -525,6 +525,26 @@ bool Window::isMaximized() const {
 #endif
 }
 
+void Window::getWindowSize(int& w, int& h) const {
+    w = h = 0;
+    if (m_window) glfwGetWindowSize(m_window, &w, &h);
+}
+
+bool Window::isEffectivelyMaximized() const {
+    if (!m_window) return false;
+    GLFWmonitor* mon = glfwGetPrimaryMonitor();
+    if (!mon) return false;
+    const GLFWvidmode* mode = glfwGetVideoMode(mon);
+    if (!mode) return false;
+    // Compare the live FRAMEBUFFER size (m_width/m_height — kept current by the
+    // resize callback) to the monitor resolution. Covering most of the screen =>
+    // maximized. Tolerance absorbs the taskbar (work area < full mode) and a few
+    // px of borderless overhang. Using m_width/m_height (not glfwGetWindowSize,
+    // which didn't reflect programmatic resizes) keeps this consistent with the
+    // size we persist.
+    return m_width >= mode->width - 48 && m_height >= mode->height - 140;
+}
+
 void Window::maximize() {
 #ifdef _WIN32
     if (m_window) enterCustomMaximize(glfwGetWin32Window(m_window));

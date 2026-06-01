@@ -656,7 +656,7 @@ void Engine::run() {
     // the in-loop debounced save only fires once the user actually resizes.
     m_lastSavedWinW   = m_window->getWidth();
     m_lastSavedWinH   = m_window->getHeight();
-    m_lastSavedWinMax = m_window->isMaximized();
+    m_lastSavedWinMax = m_window->isEffectivelyMaximized();
 
     while (!m_window->shouldClose()) {
         m_window->pollEvents();
@@ -850,7 +850,7 @@ void Engine::run() {
             glm::vec3 p   = m_camera.getPosition();
             int  ww       = m_window->getWidth();
             int  wh       = m_window->getHeight();
-            bool wmax     = m_window->isMaximized();
+            bool wmax     = m_window->isEffectivelyMaximized();
             bool changed  = p != m_lastSavedCamPos
                          || m_camera.getYaw()   != m_lastSavedCamYaw
                          || m_camera.getPitch() != m_lastSavedCamPitch
@@ -3536,7 +3536,7 @@ void Engine::saveEditorPrefs() {
     fs::create_directories(m_projectPath, ec);
     std::ofstream f(m_projectPath + "/editor.prefs");
     if (!f) return;
-    f << "windowMaximized "    << (m_window->isMaximized() ? 1 : 0) << "\n"
+    f << "windowMaximized "    << (m_window->isEffectivelyMaximized() ? 1 : 0) << "\n"
       << "windowWidth "        << m_window->getWidth()  << "\n"
       << "windowHeight "       << m_window->getHeight() << "\n"
       << "rightDockCollapsed " << (m_rightDockCollapsed ? 1 : 0) << "\n"

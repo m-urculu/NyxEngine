@@ -59,6 +59,14 @@ public:
     bool isMaximized() const;
     void maximize();
 
+    // Window size in SCREEN coordinates (what setSize/glfwSetWindowSize use) —
+    // distinct from getWidth/getHeight, which are framebuffer pixels.
+    void getWindowSize(int& w, int& h) const;
+    // True when the window currently covers (≈) the monitor work area. Computed
+    // from live geometry, so — unlike isMaximized()'s internal flag — it can't go
+    // stale after a native edge-resize. Used for persisting the maximized state.
+    bool isEffectivelyMaximized() const;
+
     // True if the window was resized since last check (resets after reading)
     bool wasResized() const { return m_resized; }
     void resetResizedFlag() { m_resized = false; }
