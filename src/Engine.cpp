@@ -652,6 +652,12 @@ void Engine::run() {
         m_window->setSize(m_pendingWindow.w, m_pendingWindow.h);
     m_window->show();
 
+    // Seed the window-state autosave tracker with the state we just applied, so
+    // the in-loop debounced save only fires once the user actually resizes.
+    m_lastSavedWinW   = m_window->getWidth();
+    m_lastSavedWinH   = m_window->getHeight();
+    m_lastSavedWinMax = m_window->isMaximized();
+
     while (!m_window->shouldClose()) {
         m_window->pollEvents();
 
@@ -836,16 +842,23 @@ void Engine::run() {
             m_sceneDirty = false;
         }
 
-        // Persist the camera pose during the session (debounced ~0.8s after it
-        // settles), not only in the destructor — so the view survives a crash or a
-        // non-clean exit, the same way the scene auto-saves continuously.
+        // Persist the camera pose AND window size/maximized state during the
+        // session (debounced ~0.8s after they settle), not only in the destructor
+        // — so they survive a crash or a non-clean exit, the same way the scene
+        // auto-saves continuously.
         {
-            glm::vec3 p = m_camera.getPosition();
-            bool moved = p != m_lastSavedCamPos
-                      || m_camera.getYaw()   != m_lastSavedCamYaw
-                      || m_camera.getPitch() != m_lastSavedCamPitch
-                      || m_camera.getFov()   != m_lastSavedCamFov;
-            if (moved) m_prefsSaveCountdown = 0.8f;          // (re)arm while moving
+            glm::vec3 p   = m_camera.getPosition();
+            int  ww       = m_window->getWidth();
+            int  wh       = m_window->getHeight();
+            bool wmax     = m_window->isMaximized();
+            bool changed  = p != m_lastSavedCamPos
+                         || m_camera.getYaw()   != m_lastSavedCamYaw
+                         || m_camera.getPitch() != m_lastSavedCamPitch
+                         || m_camera.getFov()   != m_lastSavedCamFov
+                         || ww   != m_lastSavedWinW
+                         || wh   != m_lastSavedWinH
+                         || wmax != m_lastSavedWinMax;
+            if (changed) m_prefsSaveCountdown = 0.8f;        // (re)arm while changing
             if (m_prefsSaveCountdown > 0.0f) {
                 m_prefsSaveCountdown -= m_time.getDeltaTime();
                 if (m_prefsSaveCountdown <= 0.0f) {
@@ -854,6 +867,9 @@ void Engine::run() {
                     m_lastSavedCamYaw   = m_camera.getYaw();
                     m_lastSavedCamPitch = m_camera.getPitch();
                     m_lastSavedCamFov   = m_camera.getFov();
+                    m_lastSavedWinW     = ww;
+                    m_lastSavedWinH     = wh;
+                    m_lastSavedWinMax   = wmax;
                 }
             }
         }

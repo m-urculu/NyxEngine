@@ -119,6 +119,11 @@ private:
     float     m_lastSavedCamYaw   = 0.0f;
     float     m_lastSavedCamPitch = 0.0f;
     float     m_lastSavedCamFov   = 0.0f;
+    // Same debounce also covers window size/maximized changes (resize the window
+    // and it persists ~0.8s later, surviving a crash — not just a clean close).
+    int       m_lastSavedWinW   = 0;
+    int       m_lastSavedWinH   = 0;
+    bool      m_lastSavedWinMax = false;
     float     m_prefsSaveCountdown = -1.0f;   // <=0 idle; >0 counting down to a save
 
     // Persisted window state (editor.prefs): the maximized flag and the windowed
