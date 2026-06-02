@@ -130,6 +130,7 @@ set(ENGINE_SOURCES
     src/renderer/PointShadowMap.cpp
     src/renderer/HdrTarget.cpp
     src/renderer/BloomPass.cpp
+    src/procgen/Planet.cpp
     src/scene/Camera.cpp
     src/ui/UIPipeline.cpp
     src/ui/TitleBar.cpp

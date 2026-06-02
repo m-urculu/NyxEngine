@@ -25,7 +25,7 @@ class Registry;
 class SceneHierarchy {
 public:
     enum class Command { Delete, Copy, Cut, Paste, Duplicate, Group, Ungroup, Rename,
-                         CreateCube, CreatePointLight, CreateDirLight };
+                         CreateCube, CreatePointLight, CreateDirLight, CreatePlanet };
 
     static constexpr float HEADER_H   = 20.0f;
     static constexpr float ROW_H      = 14.0f;

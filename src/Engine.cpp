@@ -18,6 +18,7 @@
 #include "ecs/components/SkinComponent.h"
 #include "ecs/components/EnvironmentComponent.h"
 #include "ecs/systems/TransformSystem.h"
+#include "procgen/Planet.h"
 
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -32,6 +33,7 @@
 #include <set>
 #include <limits>
 #include <unordered_map>
+#include <random>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -459,6 +461,7 @@ void Engine::init(StatusFn onStatus) {
             case SceneHierarchy::Command::CreateCube:       createCubeEntity();        break;
             case SceneHierarchy::Command::CreatePointLight: createLightEntity(false);  break;
             case SceneHierarchy::Command::CreateDirLight:   createLightEntity(true);   break;
+            case SceneHierarchy::Command::CreatePlanet:     createPlanetEntity();      break;
             case SceneHierarchy::Command::Rename: {
                 if (m_hierarchy.selection().empty()) break;
                 Entity e = m_hierarchy.selection().back();
@@ -1548,6 +1551,20 @@ Mesh* Engine::resolveMesh(const std::string& source) {
         std::vector<Vertex> v; std::vector<uint32_t> i; makeCube(v, i);
         return m_resourceCache.getOrCreateMesh(m_vulkanContext, "prim:cube", v, i);
     }
+    // NB: check "prim:planet" BEFORE "prim:plane" — the latter is a prefix of the
+    // former, so the order matters or every planet would resolve to a plane.
+    if (source.rfind("prim:planet", 0) == 0) {
+        // "prim:planet:<seed>" — the seed makes terrain reproducible across scene
+        // save/load. Cache by the full source so each seed is its own mesh.
+        uint32_t seed = 1337;
+        size_t colon = source.find(':', 5);   // the ':' before the seed (after "prim")
+        if (colon != std::string::npos) {
+            try { seed = (uint32_t)std::stoul(source.substr(colon + 1)); } catch (...) {}
+        }
+        std::vector<Vertex> v; std::vector<uint32_t> i;
+        procgen::makePlanet(v, i, seed);
+        return m_resourceCache.getOrCreateMesh(m_vulkanContext, source, v, i);
+    }
     if (source.rfind("prim:plane", 0) == 0) {
         std::vector<Vertex> v; std::vector<uint32_t> i; makePlane(v, i);
         return m_resourceCache.getOrCreateMesh(m_vulkanContext, "prim:plane", v, i);
@@ -2340,6 +2357,25 @@ void Engine::createLightEntity(bool directional) {
     pushSpawnAction({e});
     m_hierarchy.setSelection({e});
     LOG_INFO("Created {} light (entity {})", directional ? "directional" : "point", e);
+}
+
+void Engine::createPlanetEntity() {
+    // Random seed → a unique planet each time, baked into the source descriptor so
+    // it regenerates identically on scene reload (resolveMesh parses the seed).
+    uint32_t seed = std::random_device{}();
+    std::string source = "prim:planet:" + std::to_string(seed);
+    Mesh* mesh = resolveMesh(source);
+    if (!mesh) { LOG_WARN("createPlanetEntity: planet mesh unavailable"); return; }
+
+    // Place it well in front of the camera (it's ~radius 8 once scaled, so don't
+    // drop it on top of the camera). White matte material → the per-vertex biome
+    // colours come through as albedo, lit by the sun + sky IBL.
+    glm::vec3 pos = m_camera.getPosition() + m_camera.getFront() * 30.0f;
+    Entity e = createMeshEntity(mesh, m_resourceCache.getDefaultTexture(), pos,
+                                {8.0f, 8.0f, 8.0f}, {1, 1, 1, 1}, 0.0f, 0.9f, source);
+    pushSpawnAction({e});
+    m_hierarchy.setSelection({e});
+    LOG_INFO("Created planet (entity {}, seed {})", e, seed);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

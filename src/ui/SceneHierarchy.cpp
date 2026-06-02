@@ -657,6 +657,7 @@ void SceneHierarchy::openMenu(double mx, double my) {
     m_menuItems.push_back({"Create Cube",              Command::CreateCube});
     m_menuItems.push_back({"Create Point Light",       Command::CreatePointLight});
     m_menuItems.push_back({"Create Directional Light", Command::CreateDirLight});
+    m_menuItems.push_back({"Create Planet",            Command::CreatePlanet});
 
     bool has = !m_selected.empty();
     if (has) {
