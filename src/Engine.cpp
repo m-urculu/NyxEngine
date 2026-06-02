@@ -377,6 +377,21 @@ void Engine::init(StatusFn onStatus) {
         m_console.print(std::string("animation ") + (m_animPlaying ? "playing" : "paused")
                         + " (" + std::to_string((int)m_animClips.size()) + " clip(s))");
     });
+    // Procgen: generate a planet (icosphere + fractal-noise terrain + biome colors).
+    // `procgen.planet` uses a random seed; `procgen.planet <seed>` is reproducible.
+    m_console.registerCommand("procgen.planet",
+                              "procgen.planet [seed] - generate a procgen planet (random seed if omitted)",
+                              [this, errCol](const std::vector<std::string>& a) {
+        uint32_t seed;
+        if (a.empty()) {
+            seed = std::random_device{}();
+        } else {
+            try { seed = (uint32_t)std::stoul(a[0]); }
+            catch (...) { m_console.print("usage: procgen.planet [seed]", errCol); return; }
+        }
+        createPlanetEntity(seed);
+        m_console.print("Spawned planet (seed " + std::to_string(seed) + ")");
+    });
 
     // Every clicked file becomes a closable tab in the editor: code/text → editable
     // tab, image → flat preview, .mat → material sphere, everything else → a binary
@@ -461,7 +476,6 @@ void Engine::init(StatusFn onStatus) {
             case SceneHierarchy::Command::CreateCube:       createCubeEntity();        break;
             case SceneHierarchy::Command::CreatePointLight: createLightEntity(false);  break;
             case SceneHierarchy::Command::CreateDirLight:   createLightEntity(true);   break;
-            case SceneHierarchy::Command::CreatePlanet:     createPlanetEntity();      break;
             case SceneHierarchy::Command::Rename: {
                 if (m_hierarchy.selection().empty()) break;
                 Entity e = m_hierarchy.selection().back();
@@ -2359,10 +2373,9 @@ void Engine::createLightEntity(bool directional) {
     LOG_INFO("Created {} light (entity {})", directional ? "directional" : "point", e);
 }
 
-void Engine::createPlanetEntity() {
-    // Random seed → a unique planet each time, baked into the source descriptor so
-    // it regenerates identically on scene reload (resolveMesh parses the seed).
-    uint32_t seed = std::random_device{}();
+void Engine::createPlanetEntity(uint32_t seed) {
+    // The seed is baked into the source descriptor so the planet regenerates
+    // identically on scene reload (resolveMesh parses it back out).
     std::string source = "prim:planet:" + std::to_string(seed);
     Mesh* mesh = resolveMesh(source);
     if (!mesh) { LOG_WARN("createPlanetEntity: planet mesh unavailable"); return; }

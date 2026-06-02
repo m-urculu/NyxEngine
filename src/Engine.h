@@ -317,7 +317,7 @@ private:
     // the camera, registers a Spawn undo action, and selects it.
     void  createCubeEntity();
     void  createLightEntity(bool directional);   // true = directional (sun), false = point
-    void  createPlanetEntity();                   // procgen icosphere planet (random seed)
+    void  createPlanetEntity(uint32_t seed);      // procgen icosphere planet (console: procgen.planet)
 
     // Entity clipboard commands acting on the Scene Hierarchy's current selection.
     void  deleteSelection();
