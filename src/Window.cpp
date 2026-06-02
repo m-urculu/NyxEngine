@@ -531,26 +531,18 @@ void Window::getWindowSize(int& w, int& h) const {
 }
 
 bool Window::isEffectivelyMaximized() const {
-    if (!m_window) return false;
-    GLFWmonitor* mon = glfwGetPrimaryMonitor();
-    if (!mon) return false;
-    const GLFWvidmode* mode = glfwGetVideoMode(mon);
-    if (!mode) return false;
-    // Compare the live FRAMEBUFFER size (m_width/m_height — kept current by the
-    // resize callback) to the monitor resolution. Covering most of the screen =>
-    // maximized. Tolerance absorbs the taskbar (work area < full mode) and a few
-    // px of borderless overhang. Using m_width/m_height (not glfwGetWindowSize,
-    // which didn't reflect programmatic resizes) keeps this consistent with the
-    // size we persist.
-    return m_width >= mode->width - 48 && m_height >= mode->height - 140;
+    // The window has a native OS title bar, so the maximize button toggles the
+    // real OS maximized state. Query that directly (GLFW_MAXIMIZED) rather than
+    // guessing from geometry — accurate and DPI/multi-monitor proof.
+    return m_window && glfwGetWindowAttrib(m_window, GLFW_MAXIMIZED) != 0;
 }
 
 void Window::maximize() {
-#ifdef _WIN32
-    if (m_window) enterCustomMaximize(glfwGetWin32Window(m_window));
-#else
+    // Native maximize (matches the OS maximize button the user clicks). The old
+    // custom borderless maximize (enterCustomMaximize) was a leftover from when
+    // the window had no OS frame; it didn't set the real maximized state, so a
+    // restored "maximized" window wasn't actually maximized.
     if (m_window) glfwMaximizeWindow(m_window);
-#endif
 }
 
 void toggleCustomMaximize(GLFWwindow* w) {
