@@ -115,17 +115,19 @@ private:
     // saves on a clean exit, but this flushes the pose ~0.8s after the camera
     // settles so it also survives a crash / kill. Seeded with the loaded pose so
     // launch itself doesn't trigger a write.
-    glm::vec3 m_lastSavedCamPos{0.0f};
-    float     m_lastSavedCamYaw   = 0.0f;
-    float     m_lastSavedCamPitch = 0.0f;
-    float     m_lastSavedCamFov   = 0.0f;
-    // Same debounce also covers window size/maximized changes (resize the window
-    // and it persists ~0.8s later, surviving a crash — not just a clean close).
-    int       m_lastSavedWinW   = 0;
-    int       m_lastSavedWinH   = 0;
-    bool      m_lastSavedWinMax = false;
-    bool      m_lastSavedFullscreen = false;
-    float     m_prefsSaveCountdown = -1.0f;   // <=0 idle; >0 counting down to a save
+    // PREVIOUS-FRAME snapshot for the debounced autosave (camera pose + window
+    // state). A value differing from last frame (re)arms the countdown; once
+    // everything is stable for the debounce window the prefs are written. Seeded
+    // with the startup state so launch itself doesn't trigger a save.
+    glm::vec3 m_prevCamPos{0.0f};
+    float     m_prevCamYaw   = 0.0f;
+    float     m_prevCamPitch = 0.0f;
+    float     m_prevCamFov   = 0.0f;
+    int       m_prevWinW   = 0;
+    int       m_prevWinH   = 0;
+    bool      m_prevWinMax = false;
+    bool      m_prevFullscreen = false;
+    float     m_prefsSaveCountdown = -1.0f;   // <0 idle; >0 counting down to a save
 
     // Persisted window state (editor.prefs): fullscreen / maximized flags and the
     // windowed size. Position is intentionally NOT persisted (restoring it was the

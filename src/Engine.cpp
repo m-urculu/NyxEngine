@@ -580,12 +580,12 @@ void Engine::init(StatusFn onStatus) {
         m_pendingCameraPose.has = false;
     }
 
-    // Seed the autosave tracker with the pose we just restored so the in-session
-    // debounced save (in run()) only fires once the user actually moves.
-    m_lastSavedCamPos   = m_camera.getPosition();
-    m_lastSavedCamYaw   = m_camera.getYaw();
-    m_lastSavedCamPitch = m_camera.getPitch();
-    m_lastSavedCamFov   = m_camera.getFov();
+    // Seed the previous-frame tracker with the pose we just restored so the
+    // in-session debounced save (in run()) only fires once the user actually moves.
+    m_prevCamPos   = m_camera.getPosition();
+    m_prevCamYaw   = m_camera.getYaw();
+    m_prevCamPitch = m_camera.getPitch();
+    m_prevCamFov   = m_camera.getFov();
 
     m_time.init();
 
@@ -656,14 +656,14 @@ void Engine::run() {
         m_window->maximize();
     m_window->show();
 
-    // Seed the autosave trackers with the state we just applied so the in-loop
-    // debounced save only fires once the user actually changes something.
+    // Seed the previous-frame trackers with the state we just applied so the
+    // in-loop debounced save only fires once the user actually changes something.
     m_windowedW = (m_pendingWindow.w > 0) ? m_pendingWindow.w : m_window->getWidth();
     m_windowedH = (m_pendingWindow.h > 0) ? m_pendingWindow.h : m_window->getHeight();
-    m_lastSavedWinW       = m_window->getWidth();
-    m_lastSavedWinH       = m_window->getHeight();
-    m_lastSavedWinMax     = m_window->isEffectivelyMaximized();
-    m_lastSavedFullscreen = m_window->isFullscreen();
+    m_prevWinW       = m_window->getWidth();
+    m_prevWinH       = m_window->getHeight();
+    m_prevWinMax     = m_window->isEffectivelyMaximized();
+    m_prevFullscreen = m_window->isFullscreen();
 
     while (!m_window->shouldClose()) {
         m_window->pollEvents();
@@ -854,35 +854,38 @@ void Engine::run() {
         // — so they survive a crash or a non-clean exit, the same way the scene
         // auto-saves continuously.
         {
-            glm::vec3 p   = m_camera.getPosition();
-            int  ww       = m_window->getWidth();
-            int  wh       = m_window->getHeight();
-            bool wmax     = m_window->isEffectivelyMaximized();
-            bool wfs      = m_window->isFullscreen();
+            glm::vec3 p    = m_camera.getPosition();
+            float yaw      = m_camera.getYaw();
+            float pitch    = m_camera.getPitch();
+            float fov      = m_camera.getFov();
+            int  ww        = m_window->getWidth();
+            int  wh        = m_window->getHeight();
+            bool wmax      = m_window->isEffectivelyMaximized();
+            bool wfs       = m_window->isFullscreen();
             // Remember the size only while plain-windowed (this is what we persist
             // as the windowed size).
             if (!wfs && !wmax) { m_windowedW = ww; m_windowedH = wh; }
-            bool changed  = p != m_lastSavedCamPos
-                         || m_camera.getYaw()   != m_lastSavedCamYaw
-                         || m_camera.getPitch() != m_lastSavedCamPitch
-                         || m_camera.getFov()   != m_lastSavedCamFov
-                         || ww   != m_lastSavedWinW
-                         || wh   != m_lastSavedWinH
-                         || wmax != m_lastSavedWinMax
-                         || wfs  != m_lastSavedFullscreen;
-            if (changed) m_prefsSaveCountdown = 0.8f;        // (re)arm while changing
-            if (m_prefsSaveCountdown > 0.0f) {
+
+            // Debounce against the PREVIOUS FRAME (the m_prev* trackers hold last
+            // frame's values), not the last save: arm the countdown while a value
+            // is actively changing, then fire ONCE it's been stable ~0.8s. Comparing
+            // to the last-SAVED value re-armed every frame until the save, so the
+            // countdown never reached 0 and nothing was ever auto-saved.
+            bool changedThisFrame =
+                   p     != m_prevCamPos   || yaw  != m_prevCamYaw
+                || pitch != m_prevCamPitch || fov  != m_prevCamFov
+                || ww    != m_prevWinW     || wh   != m_prevWinH
+                || wmax  != m_prevWinMax   || wfs  != m_prevFullscreen;
+            m_prevCamPos = p; m_prevCamYaw = yaw; m_prevCamPitch = pitch; m_prevCamFov = fov;
+            m_prevWinW = ww;  m_prevWinH = wh;  m_prevWinMax = wmax; m_prevFullscreen = wfs;
+
+            if (changedThisFrame) {
+                m_prefsSaveCountdown = 0.8f;                 // (re)arm while changing
+            } else if (m_prefsSaveCountdown > 0.0f) {
                 m_prefsSaveCountdown -= m_time.getDeltaTime();
                 if (m_prefsSaveCountdown <= 0.0f) {
                     saveEditorPrefs();
-                    m_lastSavedCamPos     = p;
-                    m_lastSavedCamYaw     = m_camera.getYaw();
-                    m_lastSavedCamPitch   = m_camera.getPitch();
-                    m_lastSavedCamFov     = m_camera.getFov();
-                    m_lastSavedWinW       = ww;
-                    m_lastSavedWinH       = wh;
-                    m_lastSavedWinMax     = wmax;
-                    m_lastSavedFullscreen = wfs;
+                    m_prefsSaveCountdown = -1.0f;            // done until the next change
                 }
             }
         }
