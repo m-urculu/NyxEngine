@@ -22,6 +22,7 @@ public:
     VkFormat         getImageFormat()  const { return m_imageFormat; }
     VkExtent2D       getExtent()      const { return m_extent; }
     const std::vector<VkImageView>& getImageViews() const { return m_imageViews; }
+    const std::vector<VkImage>&     getImages()     const { return m_images; }
 
     DepthBuffer&       getDepthBuffer()       { return m_depthBuffer; }
     const DepthBuffer& getDepthBuffer() const { return m_depthBuffer; }

@@ -45,6 +45,7 @@ layout(location = 1) out vec3 fragNormal;
 layout(location = 2) out vec3 fragWorldPos;
 layout(location = 3) out vec2 fragTexCoord;
 layout(location = 4) out vec3 fragDiffIBL;     // per-vertex sky irradiance
+layout(location = 5) flat out float occludable;  // skinned meshes are never terrain → 0
 
 vec3 sampleSky(vec3 dir) {
     float u = max( dir.y, 0.0);
@@ -73,4 +74,5 @@ void main() {
     fragWorldPos = worldPos.xyz;
     fragTexCoord = inTexCoord;
     fragDiffIBL  = sampleSky(normalize(worldN));
+    occludable   = 0.0;
 }

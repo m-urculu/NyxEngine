@@ -77,11 +77,14 @@ void Input::update() {
     double mouseX, mouseY;
     glfwGetCursorPos(s_window, &mouseX, &mouseY);
 
-    // Camera orbit: middle-mouse hold drives the rotation deltas (consumed by the
-    // Engine, which orbits around the current selection).
+    // Camera orbit: middle-mouse hold drives the rotation deltas (editor orbit).
     bool orbiting = isOrbiting();
+    // Free-look (FPS / planet walk): when the cursor is captured (disabled) the mouse
+    // drives the look every frame with NO button held. GLFW reports virtual
+    // unbounded motion in this mode, so the delta keeps working.
+    bool captured = s_window && glfwGetInputMode(s_window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED;
 
-    if (!orbiting) {
+    if (!orbiting && !captured) {
         s_deltaX = 0.0f;
         s_deltaY = 0.0f;
         s_firstMouse = true;

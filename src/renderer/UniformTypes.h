@@ -60,6 +60,12 @@ struct UniformBufferObject {
     // the shadow map's clip space. Built CPU-side each frame from the directional
     // sun light's direction (orthographic projection looking along the sun).
     glm::mat4 lightSpace;
+
+    // Third-person occlusion fade. xyz = the character's position in camera-relative
+    // space (camera at origin); w = cone radius (0 = disabled). Fragments inside the
+    // tube along the camera→character line of sight, nearer than the character, get
+    // dither-faded so terrain between the camera and player turns see-through.
+    glm::vec4 occluder;
 };
 
 // Per-object data pushed per draw call — 128 bytes

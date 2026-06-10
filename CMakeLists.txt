@@ -130,7 +130,7 @@ set(ENGINE_SOURCES
     src/renderer/PointShadowMap.cpp
     src/renderer/HdrTarget.cpp
     src/renderer/BloomPass.cpp
-    src/procgen/Planet.cpp
+    src/planet/PlanetSystem.cpp
     src/scene/Camera.cpp
     src/ui/UIPipeline.cpp
     src/ui/TitleBar.cpp
@@ -145,6 +145,32 @@ set(ENGINE_SOURCES
     src/ui/Splash.cpp
 )
 
+# ── Project procgen scripts (C++, owned by the active project) ───────────────
+# Procgen generators are PROJECT scripts, not engine code: they live in
+# projects/<NYX_PROJECT>/procgen/*.cpp. Nyx has no runtime C++ scripting, so they
+# are compiled into the build — drop a .cpp in that folder and reconfigure (or just
+# rebuild; CONFIGURE_DEPENDS re-globs on build) and it's picked up. The project root
+# is added to the include path so a script's "procgen/Foo.h" header resolves, while
+# engine headers ("renderer/Vertex.h", …) resolve via src/.
+set(NYX_PROJECT "New project" CACHE STRING
+    "Active project whose procgen/*.cpp scripts are compiled into the build")
+set(NYX_PROJECT_DIR "${CMAKE_SOURCE_DIR}/projects/${NYX_PROJECT}")
+file(GLOB PROJECT_PROCGEN_SOURCES CONFIGURE_DEPENDS "${NYX_PROJECT_DIR}/procgen/*.cpp")
+if(PROJECT_PROCGEN_SOURCES)
+    list(APPEND ENGINE_SOURCES ${PROJECT_PROCGEN_SOURCES})
+    message(STATUS "Nyx: compiling project procgen scripts from ${NYX_PROJECT_DIR}/procgen")
+endif()
+
+# Project gameplay scripts (C++): everything "in-game" — player controls, character
+# behaviour, game rules — lives in projects/<NYX_PROJECT>/scripts/*.cpp, NOT in the
+# engine. Same compiled-in model as procgen (no runtime scripting). The engine
+# exposes a GameContext (src/game/GameScript.h) that these scripts drive each frame.
+file(GLOB PROJECT_GAME_SOURCES CONFIGURE_DEPENDS "${NYX_PROJECT_DIR}/scripts/*.cpp")
+if(PROJECT_GAME_SOURCES)
+    list(APPEND ENGINE_SOURCES ${PROJECT_GAME_SOURCES})
+    message(STATUS "Nyx: compiling project gameplay scripts from ${NYX_PROJECT_DIR}/scripts")
+endif()
+
 # ── Windows app icon (compiled into the exe; GLFW reads the "GLFW_ICON" resource)
 if(WIN32)
     list(APPEND ENGINE_SOURCES resources/nyx.rc)
@@ -156,6 +182,7 @@ add_executable(${PROJECT_NAME} ${ENGINE_SOURCES})
 # ── Include directories ─────────────────────────────────────────────────────
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${NYX_PROJECT_DIR}            # project scripts' headers: #include "procgen/Foo.h"
 )
 
 # ── Link libraries ──────────────────────────────────────────────────────────

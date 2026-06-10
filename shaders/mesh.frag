@@ -8,6 +8,7 @@ layout(location = 1) in vec3 fragNormal;
 layout(location = 2) in vec3 fragWorldPos;
 layout(location = 3) in vec2 fragTexCoord;
 layout(location = 4) in vec3 fragDiffIBL;       // computed per-vertex, interpolated
+layout(location = 5) flat in float occludable;  // 1 = planet terrain (cuttable); 0 = entities
 
 struct GpuLightData {
     vec4 positionAndType;
@@ -26,6 +27,7 @@ layout(set = 0, binding = 0) uniform UniformBufferObject {
     vec4 skyHorizon;
     vec4 skyGround;
     mat4 lightSpace;       // sun shadow map projection (world → light clip space)
+    vec4 occluder;         // xyz = character (camera-relative), w = cos(tight cone half-angle)
 } ubo;
 
 // Sun shadow map (depth texture, written each frame from the sun's POV). Sampled
@@ -161,6 +163,24 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 }
 
 void main() {
+    // Third-person occlusion: the occluding mountain between camera and character is
+    // drawn GHOSTED (low opacity) so he shows through, while the rest of the terrain
+    // stays opaque. occludable encodes the draw: 0 = entity (never affected); ~1 = the
+    // OPAQUE terrain pass (skip the ghost region — it's drawn by the other pass); ~3 =
+    // the GHOST terrain pass (draw ONLY the ghost region, at low opacity). Two passes
+    // because the ghost pass writes no depth (so BOTH mountain slopes show, not just the
+    // near one), which can't coexist with opaque depth-write in one pipeline.
+    // Third-person see-through. The character is drawn a SECOND time (overlay pass,
+    // occludable>2.5, depth-test GREATER → only where terrain hides him) with a screen-
+    // door dither: kept pixels show the lit character, dropped pixels reveal the SOLID
+    // terrain behind him. So you see him pixelated "through" the terrain, while the
+    // terrain stays fully opaque — the planet never goes hollow/see-into and there are no
+    // chunk seams. Terrain and the normal character pass have occludable==0 → unaffected.
+    if (occludable > 2.5) {
+        ivec2 px = ivec2(gl_FragCoord.xy) >> 1;          // 2×2 blocks → clearly "pixelated"
+        if (((px.x + px.y) & 1) == 0) discard;           // drop ~half → solid terrain shows through
+    }
+
     // Base color is sampled from an sRGB texture (auto-linearized by the GPU).
     vec4 baseSample = texture(baseColorMap, fragTexCoord);
 
@@ -279,5 +299,7 @@ void main() {
     vec3 color = ambient + Lo;
     // No tonemap here — output linear HDR so bloom can extract bright values before
     // dynamic range gets compressed. The composite pass owns ACES.
+    // Fully opaque everywhere — the ghost pass's see-through comes from the dither
+    // discard above (screen-door), not from alpha. So no blend artifacts at the seams.
     outColor = vec4(color, baseSample.a * material.baseColorFactor.a);
 }

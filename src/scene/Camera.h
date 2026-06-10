@@ -34,6 +34,10 @@ public:
     void  setFov(float fovDegrees) { m_fov = fovDegrees; }   // proj rebuilt from m_fov each frame
     float getFov() const { return m_fov; }
 
+    // Near/far clip planes. Fixed at 0.01/10000 for the editor; the planet system
+    // drives them dynamically by altitude so a planetary-scale world stays in range.
+    void  setClip(float nearP, float farP) { m_nearPlane = nearP; m_farPlane = farP; }
+
     // Pose accessors so the editor can persist camera state across sessions.
     void  setPose(glm::vec3 position, float yawDegrees, float pitchDegrees) {
         m_position = position; m_yaw = yawDegrees; m_pitch = pitchDegrees;
@@ -41,6 +45,18 @@ public:
     }
     float getYaw()   const { return m_yaw; }
     float getPitch() const { return m_pitch; }
+
+    // Set the view basis directly (position + look direction + an arbitrary up).
+    // Used by the planet walk controller, where "up" is radial (away from the
+    // planet centre) and can't be expressed by the yaw/pitch + world-up model.
+    // getViewMatrix() already builds lookAt(pos, pos+front, up) from these.
+    void setBasis(const glm::vec3& pos, const glm::vec3& front, const glm::vec3& up) {
+        m_position = pos;
+        m_front    = glm::normalize(front);
+        m_up       = glm::normalize(up);
+        m_right    = glm::normalize(glm::cross(m_front, m_up));
+    }
+    glm::vec3 getUp() const { return m_up; }
 
     // Reposition along the current view direction so a sphere of `radius`
     // around `center` fits comfortably in the FOV. Yaw / pitch unchanged.

@@ -39,6 +39,10 @@ layout(location = 1) out vec3 fragNormal;
 layout(location = 2) out vec3 fragWorldPos;
 layout(location = 3) out vec2 fragTexCoord;
 layout(location = 4) out vec3 fragDiffIBL;     // per-vertex sky irradiance, interpolated
+// 1 = this draw may be cut away by the third-person occlusion window (planet terrain
+// only). Packed into normalMatrix[3][0], an unused slot (mat3() ignores column 3), so
+// no push-constant layout change. Entities leave it 0 → never cut.
+layout(location = 5) flat out float occludable;
 
 // Cheap 3-color weighted blend — diffuse IBL is low-frequency so vertex interpolation
 // is plenty. Sampling once per vertex (not per pixel) is one of the biggest wins.
@@ -61,4 +65,5 @@ void main() {
     fragWorldPos = worldPos.xyz;
     fragTexCoord = inTexCoord;
     fragDiffIBL  = sampleSky(normalize(worldN));
+    occludable   = pc.normalMatrix[3][0];
 }

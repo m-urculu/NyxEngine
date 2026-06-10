@@ -41,9 +41,24 @@ void Pipeline::init(VulkanContext& context, VkExtent2D swapchainExtent, VkFormat
                            { globalLayout, materialLayout }, unusedLayout, m_cutoutPipeline,
                            VK_CULL_MODE_NONE);
     if (unusedLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(context.getDevice(), unusedLayout, nullptr);
+    // Character see-through overlay: mesh.vert + mesh.frag (FULLY LIT — no shading flip),
+    // depth test GREATER + write OFF → redraws the character ONLY where it's behind terrain.
+    // The shader screen-door-dithers it (occludable==3) so the solid terrain shows through
+    // the dropped pixels → a pixelated see-through with the planet staying solid.
+    //
+    // Cull FRONT (not NONE): only the camera-facing surface may draw. Otherwise the mesh's
+    // far-side faces — always "behind" its near faces — pass the GREATER test and dither
+    // over the character even when nothing covers him. (The avatar mesh is inside-out, so
+    // its camera-facing surface is the FRONT-wound one we cull away here... wait — inside-
+    // out means camera-facing is back-wound, so culling FRONT keeps exactly that surface.)
+    VkPipelineLayout unusedOverlay = VK_NULL_HANDLE;
+    createGraphicsPipeline(context.getDevice(), "shaders/mesh.vert.spv", "shaders/mesh.frag.spv",
+                           { globalLayout, materialLayout }, unusedOverlay, m_overlayPipeline,
+                           VK_CULL_MODE_FRONT_BIT, VK_COMPARE_OP_GREATER, VK_FALSE, VK_FALSE);
+    if (unusedOverlay != VK_NULL_HANDLE) vkDestroyPipelineLayout(context.getDevice(), unusedOverlay, nullptr);
     createSkyPipeline(context.getDevice(), globalLayout);
     createDepthPrePassPipeline(context.getDevice(), globalLayout);
-    LOG_INFO("Graphics pipelines created (mesh + skinned + cutout + sky + depth-prepass)");
+    LOG_INFO("Graphics pipelines created (mesh + skinned + cutout + overlay + sky + depth-prepass)");
 }
 
 void Pipeline::cleanup(VkDevice device) {
@@ -70,6 +85,10 @@ void Pipeline::cleanup(VkDevice device) {
     if (m_cutoutPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(device, m_cutoutPipeline, nullptr);
         m_cutoutPipeline = VK_NULL_HANDLE;
+    }
+    if (m_overlayPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, m_overlayPipeline, nullptr);
+        m_overlayPipeline = VK_NULL_HANDLE;
     }
     if (m_skinnedPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(device, m_skinnedPipeline, nullptr);
@@ -190,7 +209,8 @@ void Pipeline::createGraphicsPipeline(VkDevice device, const std::string& vertPa
                                        VkPipelineLayout& outLayout, VkPipeline& outPipeline,
                                        VkCullModeFlags cullMode,
                                        VkCompareOp     depthCompareOp,
-                                       VkBool32        depthWriteEnable) {
+                                       VkBool32        depthWriteEnable,
+                                       VkBool32        blendEnable) {
     // ── Load compiled shaders ──────────────────────────────────────────────
     auto vertCode = readShaderFile(vertPath);
     auto fragCode = readShaderFile(fragPath);
@@ -258,7 +278,13 @@ void Pipeline::createGraphicsPipeline(VkDevice device, const std::string& vertPa
     VkPipelineColorBlendAttachmentState colorBlendAttachment{};
     colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
                                         | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    colorBlendAttachment.blendEnable = VK_FALSE;
+    colorBlendAttachment.blendEnable         = blendEnable;
+    colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    colorBlendAttachment.colorBlendOp        = VK_BLEND_OP_ADD;
+    colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    colorBlendAttachment.alphaBlendOp        = VK_BLEND_OP_ADD;
 
     VkPipelineColorBlendStateCreateInfo colorBlending{};
     colorBlending.sType             = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;

@@ -44,6 +44,12 @@ public:
     VkPipeline       getCutoutPipeline()       const { return m_cutoutPipeline; }
     VkPipelineLayout getCutoutPipelineLayout() const { return m_pipelineLayout; }  // shares opaque layout
 
+    // Terrain ghost pass: mesh.vert + mesh.frag, two-sided, depth test LESS_OR_EQUAL,
+    // depth-write OFF, alpha blending ON. Redraws the planet terrain that occludes the
+    // third-person character at low opacity so he shows through the whole mountain (both
+    // slopes — no depth write means the far slope isn't hidden by the near one).
+    VkPipeline       getOverlayPipeline()       const { return m_overlayPipeline; }
+
     // Procedural skybox: fullscreen triangle, no vertex input, samples the analytic
     // sky gradient from the global UBO. Drawn first each frame; depth-write OFF and
     // test LESS_EQUAL so opaque meshes overdraw it where they exist.
@@ -65,6 +71,7 @@ private:
     VkPipelineLayout m_skinnedLayout  = VK_NULL_HANDLE;
     VkPipeline       m_skinnedPipeline = VK_NULL_HANDLE;
     VkPipeline       m_cutoutPipeline  = VK_NULL_HANDLE;
+    VkPipeline       m_overlayPipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_skyLayout       = VK_NULL_HANDLE;
     VkPipeline       m_skyPipeline     = VK_NULL_HANDLE;
     VkPipelineLayout m_depthLayout     = VK_NULL_HANDLE;
@@ -86,7 +93,8 @@ private:
                                 VkPipelineLayout& outLayout, VkPipeline& outPipeline,
                                 VkCullModeFlags cullMode = VK_CULL_MODE_BACK_BIT,
                                 VkCompareOp     depthCompareOp    = VK_COMPARE_OP_LESS,
-                                VkBool32        depthWriteEnable  = VK_TRUE);
+                                VkBool32        depthWriteEnable  = VK_TRUE,
+                                VkBool32        blendEnable       = VK_FALSE);
     void createSkyPipeline(VkDevice device, VkDescriptorSetLayout globalLayout);
     void createDepthPrePassPipeline(VkDevice device, VkDescriptorSetLayout globalLayout);
 

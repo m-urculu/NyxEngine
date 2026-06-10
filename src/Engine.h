@@ -9,6 +9,8 @@
 #include "renderer/Renderer.h"
 #include "renderer/Descriptors.h"
 #include "renderer/ResourceCache.h"
+#include "planet/PlanetSystem.h"
+#include "game/GameScript.h"
 #include "renderer/ShadowMap.h"
 #include "ui/UIPipeline.h"
 #include "renderer/ImagePipeline.h"
@@ -101,6 +103,24 @@ private:
     Inspector                m_inspector;
     Gizmo                    m_gizmo;
     Camera                   m_camera;
+    PlanetSystem             m_planet;        // chunked-LOD fly-down planet (console: planet.enter)
+
+    // Surface-exploration mode. The ENGINE owns the avatar entity + the cursor/mode
+    // state; the actual CONTROLS (movement, jump, mouse-look, follow camera) are a
+    // PROJECT gameplay script (projects/<proj>/scripts/), driven through GameContext.
+    bool        m_planetWalk         = false;
+    bool        m_walkCursorCaptured = false;
+    bool        m_prevTab            = false; // TAB cursor-toggle edge-detect
+    bool        m_prevEnter          = false; // ENTER walk-toggle edge-detect (play mode)
+    Entity      m_charEntity         = NULL_ENTITY;   // avatar (engine-rendered)
+    PlayerState m_player;                              // state owned here, evolved by the script
+    std::string m_shotPath;                            // NYX_SHOT: auto-screenshot path (diagnostics)
+    int         m_frameNo            = 0;              // frame counter for the auto-screenshot
+    void  updatePlanetWalk(float dt);          // build GameContext → run the project script → place avatar
+    void  setPlanetWalk(bool walk);            // enter/leave walk; spawns avatar + cursor capture
+    void  regeneratePlanet(uint32_t newSeed);  // reroll the world (rebuild chunks from a new seed)
+    GameContext makeGameContext(float dt);     // wire engine systems into the script's view
+    void  captureScreenshot(const std::string& path);  // copy the swapchain image → PNG (diagnostics)
 
     // editor.prefs is read before m_camera.init(), so a saved pose is parked
     // here and applied to the camera immediately after init runs.

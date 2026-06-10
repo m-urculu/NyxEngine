@@ -24,6 +24,11 @@ public:
     static float getMouseDeltaX();
     static float getMouseDeltaY();
 
+    // Zero the accumulated delta after it's been consumed. The fixed-timestep loop
+    // can tick 0..N times per frame; without this, a per-frame mouse delta would be
+    // applied multiple times (doubled look) or, on a 0-tick frame, not at all.
+    static void consumeMouseDelta() { s_deltaX = 0.0f; s_deltaY = 0.0f; }
+
     // Call once per frame to update deltas
     static void update();
 

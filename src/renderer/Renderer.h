@@ -3,6 +3,7 @@
 // Renderer.h — Frame rendering orchestrator
 
 #include <vulkan/vulkan.h>
+#include <glm/glm.hpp>
 #include <vector>
 #include <memory>
 #include "renderer/HdrTarget.h"
@@ -28,6 +29,7 @@ class MaterialPreviewPipeline;
 class SceneHierarchy;
 class Inspector;
 class Gizmo;
+class PlanetSystem;
 
 class Renderer {
 public:
@@ -49,7 +51,9 @@ public:
                     MaterialPreviewPipeline* matPipeline = nullptr,
                     SceneHierarchy* hierarchy = nullptr,
                     Inspector* inspector = nullptr,
-                    Gizmo* gizmo = nullptr);
+                    Gizmo* gizmo = nullptr,
+                    PlanetSystem* planet = nullptr,
+                    const glm::vec3& originOffset = glm::vec3(0.0f));
 
     void recreateFramebuffers(VulkanContext& context, Swapchain& swapchain, Pipeline& pipeline);
 
@@ -99,7 +103,8 @@ private:
                              UIPipeline* uiPipeline, TitleBar* titleBar,
                              ContentBrowser* contentBrowser, Console* console, CodeEditor* editor,
                              ImagePipeline* imagePipeline, MaterialPreviewPipeline* matPipeline,
-                             SceneHierarchy* hierarchy, Inspector* inspector, Gizmo* gizmo);
+                             SceneHierarchy* hierarchy, Inspector* inspector, Gizmo* gizmo,
+                             PlanetSystem* planet, const glm::vec3& originOffset);
 };
 
 } // namespace Nyx

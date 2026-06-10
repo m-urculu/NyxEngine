@@ -2,6 +2,8 @@
 #include "renderer/VulkanContext.h"
 #include "renderer/Swapchain.h"
 #include "renderer/Pipeline.h"
+#include "planet/PlanetSystem.h"
+#include <glm/gtc/matrix_transform.hpp>
 #include "renderer/ShadowMap.h"
 #include "renderer/HdrTarget.h"
 #include "renderer/Mesh.h"
@@ -26,6 +28,7 @@
 
 #include <cstring>
 #include "ecs/components/MaterialComponent.h"
+#include "ecs/components/OcclusionOverlay.h"
 #include "ecs/components/SkinComponent.h"
 #include "Logger.h"
 
@@ -133,7 +136,8 @@ bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain,
                           UIPipeline* uiPipeline, TitleBar* titleBar,
                           ContentBrowser* contentBrowser, Console* console, CodeEditor* editor,
                           ImagePipeline* imagePipeline, MaterialPreviewPipeline* matPipeline,
-                          SceneHierarchy* hierarchy, Inspector* inspector, Gizmo* gizmo) {
+                          SceneHierarchy* hierarchy, Inspector* inspector, Gizmo* gizmo,
+                          PlanetSystem* planet, const glm::vec3& originOffset) {
     VkDevice device = context.getDevice();
 
     vkWaitForFences(device, 1, &m_inFlightFences[m_currentFrame],
@@ -163,7 +167,7 @@ bool Renderer::drawFrame(VulkanContext& context, Swapchain& swapchain,
                         registry, descriptors, shadowMap,
                         pointShadowPool, pointShadowJobs, pointShadowJobCount,
                         uiPipeline, titleBar, contentBrowser, console, editor,
-                        imagePipeline, matPipeline, hierarchy, inspector, gizmo);
+                        imagePipeline, matPipeline, hierarchy, inspector, gizmo, planet, originOffset);
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -383,7 +387,10 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
                                     UIPipeline* uiPipeline, TitleBar* titleBar,
                                     ContentBrowser* contentBrowser, Console* console, CodeEditor* editor,
                                     ImagePipeline* imagePipeline, MaterialPreviewPipeline* matPipeline,
-                                    SceneHierarchy* hierarchy, Inspector* inspector, Gizmo* gizmo) {
+                                    SceneHierarchy* hierarchy, Inspector* inspector, Gizmo* gizmo,
+                                    PlanetSystem* planet, const glm::vec3& originOffset) {
+    // Camera-relative origin shift for floating origin (zero when no planet active).
+    const glm::mat4 originShift = glm::translate(glm::mat4(1.0f), -originOffset);
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
@@ -547,12 +554,15 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
             if (isCutout || isSkinned) continue;     // not part of the opaque pre-pass
 
             PushConstants pc{};
-            pc.model        = registry.get<TransformComponent>(entity).worldMatrix;
+            pc.model        = originShift * registry.get<TransformComponent>(entity).worldMatrix;
             pc.normalMatrix = glm::mat4(1.0f);       // unused by depth_only.vert
             vkCmdPushConstants(commandBuffer, pipeline.getDepthPrePassPipelineLayout(),
                                VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
             mc.mesh->draw(commandBuffer);
         }
+        // Planet chunks are NOT in the pre-pass — they're drawn two-sided with their
+        // own depth write in the main pass (so the camera can't see through terrain
+        // into the planet interior).
     }
 
     // Bind the global set again under the mesh pipeline layout (Vulkan re-binds are
@@ -598,7 +608,7 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
         // Push per-object model + normalMatrix (ignored by the skinned shader, but
         // kept for layout compatibility).
         PushConstants pc{};
-        pc.model        = tc.worldMatrix;
+        pc.model        = originShift * tc.worldMatrix;
         pc.normalMatrix = glm::transpose(glm::inverse(tc.worldMatrix));
 
         vkCmdPushConstants(commandBuffer, layout,
@@ -621,6 +631,64 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t image
         }
 
         mc.mesh->draw(commandBuffer);
+    }
+
+    // ── Planet chunks ───────────────────────────────────────────────────────────
+    // Drawn after the ECS meshes with the opaque pipeline (depth EQUAL, matching the
+    // pre-pass above) and a single shared material set. They live outside the ECS so
+    // they don't pollute the scene/hierarchy/undo.
+    if (planet && planet->active() && !planet->draws().empty()) {
+        // Terrain: a single fully-opaque pass (cutout pipeline: cull NONE, depth LESS +
+        // write) so the planet always reads solid — no transparency on the terrain means
+        // no chunk-skirt seams and no seeing into the hollow interior.
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.getCutoutPipeline());
+        VkDescriptorSet matSet = planet->materialSet();
+        if (matSet != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    pipeline.getPipelineLayout(), 1, 1, &matSet, 0, nullptr);
+        }
+        for (const auto& d : planet->draws()) {
+            PushConstants pc{};
+            pc.model        = d.model;
+            pc.normalMatrix = glm::transpose(glm::inverse(d.model));
+            vkCmdPushConstants(commandBuffer, pipeline.getPipelineLayout(),
+                               VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
+            d.mesh->draw(commandBuffer);
+        }
+    }
+
+    // ── Character see-through overlay ─────────────────────────────────────────────
+    // Redraw OcclusionOverlay-tagged entities (the third-person character) with the
+    // overlay pipeline (depth GREATER, no write) so they draw ONLY where terrain hides
+    // them. mesh.frag screen-door-dithers them (flag 3 in normalMatrix[3][0]) → pixelated
+    // see-through that reveals the SOLID terrain behind, while the character stays fully
+    // lit (same mesh.frag as the normal pass → no shading flip). Runs after the terrain.
+    {
+        bool boundOverlay = false;
+        for (size_t i = 0; i < meshPool.size(); i++) {
+            Entity entity = meshPool.getEntity(i);
+            const MeshComponent& mc = meshPool[i];
+            if (!mc.mesh) continue;
+            if (!registry.has<OcclusionOverlay>(entity)) continue;
+            if (!registry.has<TransformComponent>(entity)) continue;
+            if (!boundOverlay) {
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.getOverlayPipeline());
+                boundOverlay = true;
+            }
+            PushConstants pc{};
+            pc.model        = originShift * registry.get<TransformComponent>(entity).worldMatrix;
+            pc.normalMatrix = glm::transpose(glm::inverse(pc.model));
+            pc.normalMatrix[3][0] = 3.0f;   // flag: dithered see-through overlay pass
+            vkCmdPushConstants(commandBuffer, pipeline.getPipelineLayout(),
+                               VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
+            if (registry.has<MaterialComponent>(entity)) {
+                VkDescriptorSet ms = registry.get<MaterialComponent>(entity).descriptorSet;
+                if (ms != VK_NULL_HANDLE)
+                    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            pipeline.getPipelineLayout(), 1, 1, &ms, 0, nullptr);
+            }
+            mc.mesh->draw(commandBuffer);
+        }
     }
 
     // End of scene RP — m_hdrTarget transitions to SHADER_READ_ONLY via subpass dep.

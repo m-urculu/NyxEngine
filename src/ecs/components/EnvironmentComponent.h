@@ -42,6 +42,13 @@ struct EnvironmentComponent {
     enum class Tonemapper : uint32_t { ACES = 0, Reinhard = 1, None = 2 };
     Tonemapper tonemapper  = Tonemapper::ACES;
     float      exposure    = 0.0f;   // EV stops (0 = neutral)
+
+    // ── Walkable planet (scene world) — when set, this scene IS a planet: the
+    //    editor previews it (free-fly) and PLAY mode / the exported game spawn the
+    //    character on its surface. Round-trips through the .scene env line.
+    bool     planetActive  = false;
+    uint32_t planetSeed    = 0;
+    float    planetRadius  = 1500.0f;
 };
 
 } // namespace Nyx

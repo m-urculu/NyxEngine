@@ -14,13 +14,17 @@
 #include "ecs/components/MeshComponent.h"
 #include "ecs/components/NameComponent.h"
 #include "ecs/components/MaterialComponent.h"
+#include "ecs/components/OcclusionOverlay.h"
 #include "ecs/components/LightComponent.h"
 #include "ecs/components/SkinComponent.h"
 #include "ecs/components/EnvironmentComponent.h"
 #include "ecs/systems/TransformSystem.h"
 #include "procgen/Planet.h"
+#include <cstdlib>   // std::getenv (dev planet self-test hook)
 
 #include <GLFW/glfw3.h>
+#include <vk_mem_alloc.h>
+#include <stb_image_write.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <stdexcept>
@@ -127,6 +131,41 @@ void makeCube(std::vector<Vertex>& v, std::vector<uint32_t>& idx) {
         idx.insert(idx.end(), {base, base+2, base+1, base+2, base, base+3});
     }
 }
+// A simple third-person avatar: a capsule (sphere split + stretched) with a head
+// region and a dark "face" on the +Z front so its facing reads. Feet sit at y=0.
+void makeCharacter(std::vector<Vertex>& v, std::vector<uint32_t>& idx) {
+    const int   LATS = 12, LONS = 16;
+    const float R = 0.45f;            // body radius
+    const float H = 1.10f;            // straight cylinder section between the caps
+    constexpr float kPi = 3.14159265358979323846f;
+    const glm::vec3 body{0.30f, 0.55f, 0.95f};   // blue
+    const glm::vec3 head{0.95f, 0.85f, 0.70f};   // tan
+    const glm::vec3 face{0.12f, 0.12f, 0.18f};   // dark visor (front of the head)
+    const float yShift = R + H * 0.5f;           // lift so the lowest point sits at y=0
+    for (int i = 0; i <= LATS; ++i) {
+        float t = (float)i / LATS;
+        float phi = kPi * t;
+        float sp = std::sin(phi), cp = std::cos(phi);
+        float yOff = (cp >= 0.0f ? H * 0.5f : -H * 0.5f);     // split the sphere → capsule
+        for (int j = 0; j <= LONS; ++j) {
+            float u = (float)j / LONS;
+            float th = 2.0f * kPi * u;
+            glm::vec3 n{sp * std::cos(th), cp, sp * std::sin(th)};
+            glm::vec3 col = body;
+            if (cp > 0.45f) col = head;                       // head cap
+            if (cp > 0.25f && n.z > 0.45f) col = face;         // front-of-head visor
+            glm::vec3 pos = R * n;
+            pos.y += yOff + yShift;
+            v.push_back({pos, glm::normalize(n), col, {u, t}});
+        }
+    }
+    for (int i = 0; i < LATS; ++i)
+        for (int j = 0; j < LONS; ++j) {
+            uint32_t a = (uint32_t)(i * (LONS + 1) + j);
+            uint32_t b = (uint32_t)((i + 1) * (LONS + 1) + j);
+            idx.insert(idx.end(), {a, b, a + 1, a + 1, b, b + 1});
+        }
+}
 
 // ── Viewport math (picking + gizmo projection) ───────────────────────────────
 bool worldToScreen(const glm::vec3& w, const glm::mat4& vp, float sw, float sh, glm::vec2& out) {
@@ -226,6 +265,7 @@ Engine::~Engine() {
     m_console.cleanup(m_vulkanContext.getAllocator());
     m_contentBrowser.cleanup(m_vulkanContext.getAllocator());
     m_titleBar.cleanup(m_vulkanContext.getAllocator());
+    m_planet.cleanup(m_vulkanContext.getAllocator());
     m_matPreviewPipeline.cleanup(m_vulkanContext.getDevice());
     m_imagePipeline.cleanup(m_vulkanContext.getDevice());
     m_uiPipeline.cleanup(m_vulkanContext.getDevice());
@@ -392,6 +432,117 @@ void Engine::init(StatusFn onStatus) {
         createPlanetEntity(seed);
         m_console.print("Spawned planet (seed " + std::to_string(seed) + ")");
     });
+
+    // planet.enter — make THIS scene a walkable planet world. In the editor this
+    // configures + previews it (free-fly, scene controls); the character + walking
+    // happen in PLAY mode and the exported game (gated to game mode). Persisted in
+    // the scene's EnvironmentComponent so the play process / exported exe spawn it.
+    m_console.registerCommand("planet.enter",
+                              "planet.enter [seed] - make this scene a walkable planet (preview; walk in Play)",
+                              [this, errCol](const std::vector<std::string>& a) {
+        uint32_t seed;
+        if (a.empty()) {
+            seed = std::random_device{}();
+        } else {
+            try { seed = (uint32_t)std::stoul(a[0]); }
+            catch (...) { m_console.print("usage: planet.enter [seed]", errCol); return; }
+        }
+        const float radius = 1500.0f;                         // "huge but walkable in ~10 min"
+        const glm::vec3 center{0.0f, 0.0f, 0.0f};
+        m_renderer.waitIdle(m_vulkanContext.getDevice());     // safe to (re)build GPU meshes
+        m_planet.cleanup(m_vulkanContext.getAllocator());     // rebuild if re-entered
+        m_planet.init(m_vulkanContext, m_descriptors, m_resourceCache, seed, center, radius);
+        // Persist on the scene so Play / the exported game spawn the player here.
+        EnvironmentComponent& env = m_registry.get<EnvironmentComponent>(ensureEnvironmentEntity());
+        env.planetActive = true; env.planetSeed = seed; env.planetRadius = radius;
+        m_sceneDirty = true;
+        if (m_gameMode) {                                     // exported/play exe: drop in walking
+            setPlanetWalk(true);
+        } else {                                              // editor: free-fly preview only
+            m_camera.frame(center, radius * 1.3f);
+            m_console.print("Planet set for this scene (seed " + std::to_string(seed)
+                            + "). Free-fly to preview; press Play to walk it.");
+        }
+    });
+
+    m_console.registerCommand("planet.exit", "planet.exit - leave the streaming planet",
+                              [this](const std::vector<std::string>&) {
+        if (!m_planet.active()) { m_console.print("no active planet"); return; }
+        if (m_planetWalk) setPlanetWalk(false);             // release cursor, restore free-fly
+        m_renderer.waitIdle(m_vulkanContext.getDevice());
+        m_planet.cleanup(m_vulkanContext.getAllocator());
+        // Editor: also clear the scene's planet flag so it stops being a planet world.
+        if (!m_gameMode) {
+            EnvironmentComponent& env = m_registry.get<EnvironmentComponent>(ensureEnvironmentEntity());
+            env.planetActive = false;
+            m_sceneDirty = true;
+        }
+        m_console.print("Left planet");
+    });
+
+    m_console.registerCommand("planet.walk", "planet.walk - walk the surface (Play mode only)",
+                              [this](const std::vector<std::string>&) {
+        if (!m_gameMode) { m_console.print("walking is a Play-mode feature — press Play (the editor previews in free-fly)"); return; }
+        if (!m_planet.active()) { m_console.print("no active planet"); return; }
+        setPlanetWalk(true);
+        m_console.print("Walk mode: WASD move, mouse look, TAB frees the cursor");
+    });
+    m_console.registerCommand("planet.fly", "planet.fly - free-fly overview of the planet",
+                              [this](const std::vector<std::string>&) {
+        if (!m_planet.active()) { m_console.print("no active planet"); return; }
+        setPlanetWalk(false);
+        m_console.print("Fly mode: WASD fly, middle-drag to look");
+    });
+
+    // Objective readout of LOD streaming: cached vs visible chunk counts + the
+    // camera's distance/altitude. Fly toward the planet and re-run it — the counts
+    // should climb as finer chunks stream in.
+    m_console.registerCommand("planet.stats", "planet.stats - print planet LOD/streaming stats",
+                              [this](const std::vector<std::string>&) {
+        if (!m_planet.active()) { m_console.print("no active planet"); return; }
+        glm::vec3 c = m_planet.center();
+        float dist = glm::length(m_camera.getPosition() - c);
+        float alt  = dist - m_planet.radius();
+        m_console.print("planet: chunks=" + std::to_string(m_planet.chunkCount())
+                      + " visible=" + std::to_string(m_planet.draws().size())
+                      + " dist=" + std::to_string((int)dist)
+                      + " altitude=" + std::to_string((int)alt));
+    });
+
+    m_console.registerCommand("planet.land", "planet.land - drop the camera onto the planet surface",
+                              [this](const std::vector<std::string>&) {
+        if (!m_planet.active()) { m_console.print("no active planet"); return; }
+        glm::vec3 c = m_planet.center();
+        glm::vec3 d = m_camera.getPosition() - c;
+        if (glm::length(d) < 1e-3f) d = glm::vec3(0.0f, 1.0f, 0.0f);
+        d = glm::normalize(d);
+        float sd = m_planet.surfaceDistance(c + d * m_planet.radius());
+        m_camera.setPose(c + d * (sd + 2.0f), m_camera.getYaw(), 0.0f);
+        m_console.print("Landed on the surface");
+    });
+
+    // Dev diagnostics: NYX_SHOT=<path> auto-writes a screenshot after ~200 frames
+    // (lets the framebuffer be inspected headlessly when "black screen" reports come in).
+    if (const char* shot = std::getenv("NYX_SHOT")) m_shotPath = shot;
+
+    // Dev self-test hook: NYX_PLANET=<seed> auto-enters a planet on startup and
+    // logs chunk streaming, so the system can be verified headlessly (stdout).
+    if (const char* envSeed = std::getenv("NYX_PLANET")) {
+        uint32_t seed = 12345;
+        try { seed = (uint32_t)std::stoul(envSeed); } catch (...) {}
+        const float radius = 150000.0f;
+        const glm::vec3 center{0.0f, 0.0f, 0.0f};
+        m_renderer.waitIdle(m_vulkanContext.getDevice());
+        m_planet.init(m_vulkanContext, m_descriptors, m_resourceCache, seed, center, radius);
+        m_planet.setLogStreaming(true);
+        if (std::getenv("NYX_OVERVIEW")) {
+            m_camera.frame(center, radius * 3.0f);   // diagnostic: far overview (preview-equivalent)
+            LOG_INFO("NYX_PLANET auto-enter: seed {} (overview)", seed);
+        } else {
+            setPlanetWalk(true);             // project script (game::onSpawn) places the player on land
+            LOG_INFO("NYX_PLANET auto-enter: seed {} (walking)", seed);
+        }
+    }
 
     // Every clicked file becomes a closable tab in the editor: code/text → editable
     // tab, image → flat preview, .mat → material sphere, everything else → a binary
@@ -570,7 +721,14 @@ void Engine::init(StatusFn onStatus) {
     Input::setGroupSelectedCallback([this]() { groupSelected(); });
     Input::setViewportPressCallback([this](double mx, double my) { onViewportPress(mx, my); });
     Input::setViewportRightClickCallback([this](double mx, double my) { onViewportRightClick(mx, my); });
-    Input::setViewportZoomCallback([this](double sy) { m_camera.dolly(static_cast<float>(sy), selectionPivot()); });
+    Input::setViewportZoomCallback([this](double sy) {
+        if (m_planetWalk) {                                   // scroll zooms the third-person boom
+            m_player.camDist = glm::clamp(m_player.camDist - static_cast<float>(sy) * 2.0f, 3.0f, 60.0f);
+        } else if (!m_gameMode) {
+            m_camera.dolly(static_cast<float>(sy), selectionPivot());   // editor free-fly only
+        }
+        // Play-mode planet overview: ignore — the project script owns that camera.
+    });
     Input::setRightDockResizeCallback([this]() {
         if (!overRightDockEdge()) return false;
         m_rightDockResizing = true;
@@ -847,16 +1005,22 @@ void Engine::run() {
         // Update UBO with current camera matrices
         updateUniformBuffer(m_renderer.getCurrentFrame());
 
+        // Refresh planet LOD against the camera (no-op unless a planet is active).
+        m_planet.update(m_camera.getPosition());
+        glm::vec3 originOffset = m_planet.active() ? m_camera.getPosition() : glm::vec3(0.0f);
+
         bool ok = m_renderer.drawFrame(m_vulkanContext, m_swapchain, m_pipeline,
                                         m_registry, m_descriptors, &m_shadowMap,
                                         m_pointShadows.data(),
                                         m_pointShadowJobs.data(), m_pointShadowJobs.size(),
                                         &m_uiPipeline, &m_titleBar, &m_contentBrowser, &m_console, &m_editor,
                                         &m_imagePipeline, &m_matPreviewPipeline,
-                                        &m_hierarchy, &m_inspector, &m_gizmo);
+                                        &m_hierarchy, &m_inspector, &m_gizmo, &m_planet, originOffset);
         if (!ok) {
             handleResize();
         }
+
+        if (!m_shotPath.empty() && ++m_frameNo == 200) captureScreenshot(m_shotPath);
 
         // Persist any mutation made this frame. pushUndo flips m_sceneDirty true; the
         // save flushes the POST-mutation scene to scene.scene so the next launch sees
@@ -932,6 +1096,29 @@ void Engine::runGame() {
     m_window->maximize();
     m_window->show();
 
+    // If this scene is a walkable planet world, create the planet and drop the
+    // player onto its surface in walk mode (this is the play/exported-game path).
+    {
+        EnvironmentComponent& env = m_registry.get<EnvironmentComponent>(ensureEnvironmentEntity());
+        // Play mode always opens in the planet OVERVIEW (this is the planet game). Use the
+        // scene's configured planet if it has one, otherwise a sensible default — so Play
+        // reliably shows a planet you can reroll (Space) and drop into (Enter), even if the
+        // scene was never set up with planet.enter in the editor.
+        uint32_t seed   = env.planetActive ? env.planetSeed : 1337u;
+        // World radius 150000 (100× the old 1500). The preview still fits: the overview
+        // camera sits at a fixed multiple of the radius, so a bigger planet just sits
+        // proportionally farther and looks the same on screen. (kMaxLevel/kUniformLevel
+        // were raised so local terrain stays walkable-fine despite the larger radius.)
+        float radius = 150000.0f;
+        m_planet.init(m_vulkanContext, m_descriptors, m_resourceCache, seed, glm::vec3(0.0f), radius);
+        env.planetActive = true;          // ensure the overview branch + walk gate are live
+        env.planetSeed   = seed;
+        env.planetRadius = radius;
+        m_camera.frame(glm::vec3(0.0f), radius * 3.0f);   // pulled back; project orbit refines it
+        LOG_INFO("Game: planet overview (seed {}, radius {}) — Space = new world, Enter = explore",
+                 seed, (int)radius);
+    }
+
     while (!m_window->shouldClose()) {
         m_window->pollEvents();
 
@@ -952,6 +1139,10 @@ void Engine::runGame() {
             continue;
         }
 
+        // Refresh planet LOD/draw list against the camera (the editor loop does this
+        // too — without it the play process never streams chunks → black screen).
+        m_planet.update(m_camera.getPosition());
+
         updateUniformBuffer(m_renderer.getCurrentFrame());
 
         bool ok = m_renderer.drawFrame(m_vulkanContext, m_swapchain, m_pipeline,
@@ -960,8 +1151,10 @@ void Engine::runGame() {
                                         m_pointShadowJobs.data(), m_pointShadowJobs.size(),
                                         &m_uiPipeline, &m_titleBar, &m_contentBrowser, &m_console, &m_editor,
                                         &m_imagePipeline, &m_matPreviewPipeline,
-                                        &m_hierarchy, &m_inspector, &m_gizmo);
+                                        &m_hierarchy, &m_inspector, &m_gizmo, &m_planet,
+                                        m_planet.active() ? m_camera.getPosition() : glm::vec3(0.0f));
         if (!ok) handleResize();
+        if (!m_shotPath.empty() && ++m_frameNo == 200) captureScreenshot(m_shotPath);
         // No saveCurrentScene() — play mode is non-destructive.
     }
 
@@ -1031,16 +1224,212 @@ void Engine::updatePlayProcess() {
 #endif
 }
 
+GameContext Engine::makeGameContext(float dt) {
+    GameContext ctx;
+    ctx.dt             = dt;
+    ctx.camera         = &m_camera;
+    ctx.planet         = &m_planet;
+    ctx.player         = &m_player;
+    ctx.cursorCaptured = m_walkCursorCaptured;
+    ctx.walking        = m_planetWalk;
+    return ctx;
+}
+
+void Engine::updatePlanetWalk(float dt) {
+    // Controls are a PROJECT gameplay script: it reads input, moves the player, and
+    // drives the camera through the context. The engine just renders the avatar at
+    // the resulting player state (it owns the avatar entity, not the gameplay).
+    GameContext ctx = makeGameContext(dt);
+    game::update(ctx);
+    Input::consumeMouseDelta();   // applied once per frame even if this ticks 2× (or 0×)
+
+    if (m_charEntity != NULL_ENTITY && m_registry.has<TransformComponent>(m_charEntity)) {
+        // Right-handed basis (cross(up,forward) so col0×col1=col2): a reflection
+        // (negative determinant) makes quat_cast garbage → the avatar lies on its side.
+        glm::vec3 right = glm::normalize(glm::cross(m_player.up, m_player.forward));
+        glm::mat3 basis(right, m_player.up, m_player.forward);   // local X/Y/Z → world
+        TransformComponent& tc = m_registry.get<TransformComponent>(m_charEntity);
+        tc.position = m_player.pos;
+        tc.rotation = glm::quat_cast(glm::mat4(basis));
+        tc.scale    = glm::vec3(1.0f);
+    }
+}
+
+// Roll a new world: rebuild the planet's streaming chunks from a new seed (same centre
+// and radius). Used by the in-game overview (Space). Safe mid-loop — same teardown the
+// planet.enter console command uses (idle the GPU, free chunks, re-init).
+void Engine::regeneratePlanet(uint32_t newSeed) {
+    if (!m_planet.active()) return;
+    glm::vec3 center = m_planet.center();
+    float     radius = m_planet.radius();
+    m_renderer.waitIdle(m_vulkanContext.getDevice());
+    m_planet.cleanup(m_vulkanContext.getAllocator());
+    m_planet.init(m_vulkanContext, m_descriptors, m_resourceCache, newSeed, center, radius);
+    // Track the seed on the scene's environment so the overview keeps rolling fresh ones.
+    EnvironmentComponent& env = m_registry.get<EnvironmentComponent>(ensureEnvironmentEntity());
+    env.planetSeed = newSeed;
+    m_camera.frame(center, radius * 3.0f);   // re-frame the overview on the new planet (project orbit refines)
+    LOG_INFO("Regenerated planet world (seed {})", newSeed);
+}
+
+void Engine::captureScreenshot(const std::string& path) {
+    VkDevice     device = m_vulkanContext.getDevice();
+    VmaAllocator alloc  = m_vulkanContext.getAllocator();
+    vkDeviceWaitIdle(device);
+
+    VkExtent2D ext = m_swapchain.getExtent();
+    uint32_t W = ext.width, H = ext.height;
+    if (W == 0 || H == 0 || m_swapchain.getImages().empty()) { LOG_WARN("screenshot: no swapchain image"); return; }
+    VkImage      src = m_swapchain.getImages()[0];
+    VkFormat     fmt = m_swapchain.getImageFormat();
+    VkDeviceSize sz  = (VkDeviceSize)W * H * 4;
+
+    VkBufferCreateInfo bci{}; bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = sz; bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT; bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo aci{}; aci.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
+    VkBuffer buf; VmaAllocation bufAlloc;
+    if (vmaCreateBuffer(alloc, &bci, &aci, &buf, &bufAlloc, nullptr) != VK_SUCCESS) { LOG_WARN("screenshot: buffer alloc"); return; }
+
+    VkCommandBuffer cmd = m_vulkanContext.beginSingleTimeCommands();
+    auto barrier = [&](VkImageLayout from, VkImageLayout to, VkAccessFlags sa, VkAccessFlags da,
+                       VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
+        VkImageMemoryBarrier b{}; b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.oldLayout = from; b.newLayout = to;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = src; b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        b.srcAccessMask = sa; b.dstAccessMask = da;
+        vkCmdPipelineBarrier(cmd, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+    barrier(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            0, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkBufferImageCopy region{}; region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; region.imageExtent = {W, H, 1};
+    vkCmdCopyImageToBuffer(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &region);
+    barrier(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK_ACCESS_TRANSFER_READ_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    m_vulkanContext.endSingleTimeCommands(cmd);
+
+    void* data = nullptr; vmaMapMemory(alloc, bufAlloc, &data);
+    const uint8_t* s = (const uint8_t*)data;
+    bool bgra = (fmt == VK_FORMAT_B8G8R8A8_UNORM || fmt == VK_FORMAT_B8G8R8A8_SRGB);
+    std::vector<uint8_t> rgba(sz);
+    double lum = 0.0;
+    for (VkDeviceSize i = 0; i < (VkDeviceSize)W * H; ++i) {
+        uint8_t r = bgra ? s[i*4+2] : s[i*4+0];
+        uint8_t g = s[i*4+1];
+        uint8_t b = bgra ? s[i*4+0] : s[i*4+2];
+        rgba[i*4+0] = r; rgba[i*4+1] = g; rgba[i*4+2] = b; rgba[i*4+3] = 255;
+        lum += r + g + b;
+    }
+    vmaUnmapMemory(alloc, bufAlloc);
+    stbi_write_png(path.c_str(), (int)W, (int)H, 4, rgba.data(), (int)W * 4);
+    vmaDestroyBuffer(alloc, buf, bufAlloc);
+    LOG_INFO("screenshot: wrote {} ({}x{}) avgLum={}", path, W, H, (int)(lum / ((double)W * H * 3.0)));
+}
+
+void Engine::setPlanetWalk(bool walk) {
+    if (walk) {
+        if (!m_planet.active()) { m_console.print("no active planet"); return; }
+        // Engine owns the avatar entity (rendering); the project script owns where it
+        // goes. Spawn the avatar mesh if needed, then let the script place the player.
+        if (m_charEntity == NULL_ENTITY) {
+            std::vector<Vertex> cv; std::vector<uint32_t> ci; makeCharacter(cv, ci);
+            Mesh* cm = m_resourceCache.getOrCreateMesh(m_vulkanContext, "prim:character", cv, ci);
+            m_charEntity = createMeshEntity(cm, m_resourceCache.getDefaultTexture(), glm::vec3(0.0f),
+                                            glm::vec3(1.0f), glm::vec4(1.0f), 0.0f, 0.6f, "", "",
+                                            nullptr, nullptr, nullptr, 0.01f);   // cutout → two-sided
+            m_registry.assign<OcclusionOverlay>(m_charEntity, {});   // draw-through silhouette when behind terrain
+        }
+        GameContext ctx = makeGameContext(0.0f);
+        game::onSpawn(ctx);                                   // project script places the player
+        m_planetWalk = true;
+        m_walkCursorCaptured = true;
+        m_player.firstLook = true;                            // swallow the capture-frame mouse jump
+        m_console.setFocused(false);    // so WASD/mouse-look work immediately after the command
+        glfwSetInputMode(m_window->getHandle(), GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    } else {
+        m_planetWalk = false;
+        if (m_charEntity != NULL_ENTITY) {            // remove the avatar
+            m_registry.destroyEntity(m_charEntity);
+            m_charEntity = NULL_ENTITY;
+        }
+        if (m_walkCursorCaptured) {
+            m_walkCursorCaptured = false;
+            glfwSetInputMode(m_window->getHandle(), GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        }
+        // Hand orientation back to the free-fly camera without a snap.
+        glm::vec3 f = m_camera.getFront();
+        m_camera.setPose(m_camera.getPosition(),
+                         glm::degrees(std::atan2(f.z, f.x)),
+                         glm::degrees(std::asin(glm::clamp(f.y, -1.0f, 1.0f))));
+    }
+}
+
 void Engine::fixedUpdate(float dt) {
     // Focus pivot drives both the dynamic WASD fly speed and middle-mouse orbit:
     // the selected object's centre, or a point ahead of the camera when nothing
     // is selected. Computed once per tick and shared.
     glm::vec3 pivot = selectionPivot();
-    m_camera.update(dt, pivot);
 
-    // Middle-mouse drag orbits the camera around the current selection.
-    if (Input::isOrbiting())
-        m_camera.orbit(pivot, Input::getMouseDeltaX(), Input::getMouseDeltaY());
+    // TAB toggles the cursor free while walking, so the console / UI is reachable
+    // (mouse-look recaptures it). Edge-detected.
+    bool tab = Input::isKeyDown(GLFW_KEY_TAB);
+    if (m_planetWalk && tab && !m_prevTab) {
+        m_walkCursorCaptured = !m_walkCursorCaptured;
+        glfwSetInputMode(m_window->getHandle(), GLFW_CURSOR,
+                         m_walkCursorCaptured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+        m_player.firstLook = m_walkCursorCaptured;   // swallow the recapture-frame jump
+    }
+    m_prevTab = tab;
+
+    // Play mode only: ENTER toggles planet surface-exploration (the console isn't
+    // reachable in the game window). Bootstraps the planet if the scene configured
+    // one (or a default) and none is active yet; otherwise flips walk ↔ fly.
+    if (m_gameMode && !Input::cameraMovementSuppressed()) {
+        bool ent = Input::isKeyDown(GLFW_KEY_ENTER) || Input::isKeyDown(GLFW_KEY_KP_ENTER);
+        if (ent && !m_prevEnter) {
+            if (!m_planet.active()) {
+                EnvironmentComponent& env = m_registry.get<EnvironmentComponent>(ensureEnvironmentEntity());
+                uint32_t seed   = env.planetActive ? env.planetSeed   : 1337u;
+                float    radius = env.planetActive ? env.planetRadius : 1500.0f;
+                m_renderer.waitIdle(m_vulkanContext.getDevice());
+                m_planet.init(m_vulkanContext, m_descriptors, m_resourceCache, seed, glm::vec3(0.0f), radius);
+                setPlanetWalk(true);
+            } else {
+                setPlanetWalk(!m_planetWalk);              // walk ↔ fly overview
+            }
+        }
+        m_prevEnter = ent;
+    }
+
+    if (m_planet.active() && m_planetWalk) {
+        updatePlanetWalk(dt);                              // spherical-gravity walk
+    } else if (m_gameMode && m_planet.active()) {
+        // Play-mode planet OVERVIEW. The PROJECT script owns the camera and input here
+        // (Space rerolls the world) — the engine's free-fly camera is an EDITOR control
+        // and is deliberately NOT run in-game (that's what made Space also move the
+        // camera up). Avatar isn't spawned in the overview, so nothing else to place.
+        GameContext ctx = makeGameContext(dt);             // ctx.walking == false
+        game::update(ctx);
+        if (ctx.requestRegen) {
+            EnvironmentComponent& env = m_registry.get<EnvironmentComponent>(ensureEnvironmentEntity());
+            regeneratePlanet(env.planetSeed * 1664525u + 1013904223u);   // LCG → next seed
+        }
+    } else if (!m_gameMode) {
+        // EDITOR free-fly (never in play mode — in-game cameras are project-owned).
+        m_camera.update(dt, pivot);
+
+        // Planet surface collision in fly mode: keep the camera from sinking through
+        // the terrain so you can fly down and skim/land (free-fly + a hard floor).
+        if (m_planet.active()) {
+            glm::vec3 p  = m_camera.getPosition();
+            glm::vec3 cp = m_planet.collide(p, 2.0f);      // 2-unit eye clearance
+            if (cp != p) m_camera.setPose(cp, m_camera.getYaw(), m_camera.getPitch());
+        }
+
+        // Middle-mouse drag orbits the camera around the current selection.
+        if (Input::isOrbiting())
+            m_camera.orbit(pivot, Input::getMouseDeltaX(), Input::getMouseDeltaY());
+    }
 
     // Orbit the child entity around its parent
     if (m_orbitEntity != NULL_ENTITY && m_registry.has<TransformComponent>(m_orbitEntity)) {
@@ -1381,10 +1770,60 @@ void Engine::handleResize() {
 
 void Engine::updateUniformBuffer(uint32_t currentFrame) {
     UniformBufferObject ubo{};
-    ubo.view       = m_camera.getViewMatrix();
-    ubo.projection = m_camera.getProjectionMatrix();
 
-    ubo.cameraPosition = glm::vec4(m_camera.getPosition(), 1.0f);
+    // Floating origin: when a streaming planet is active, render camera-relative so
+    // 32-bit float precision holds at planetary distances. The view becomes
+    // rotation-only (camera at the origin), cameraPosition is zeroed, point lights
+    // and the shadow matrix are shifted by the camera, and every object's model is
+    // offset by -camPos (planet chunks do this in double; ECS entities below via the
+    // renderer). When no planet is active this is a no-op (absolute rendering).
+    const bool      camRel = m_planet.active();
+    const glm::vec3 camPos = m_camera.getPosition();
+
+    // Dynamic clip planes for planetary scale: near scales with altitude (tight on
+    // the surface, loose in orbit), far always reaches across the whole planet.
+    if (camRel) {
+        float distToCenter = glm::length(camPos - m_planet.center());
+        float maxR = m_planet.radius() * 1.25f;            // radius + max relief + margin
+        float nearP, farP;
+        if (m_planetWalk) {
+            // On the surface: tiny near for terrain right in front of the camera; far
+            // reaches a bit past the horizon so distant peaks still draw.
+            float horizon = std::sqrt(std::max(1.0f, distToCenter * distToCenter
+                                               - m_planet.radius() * m_planet.radius()));
+            nearP = 0.1f;
+            farP  = horizon + m_planet.radius() * 0.3f;
+        } else {
+            // Far overview: bracket near/far TIGHTLY around the planet. A tiny near plane
+            // at ~400k units out collapses depth precision so front/back terrain faces
+            // z-fight into holes — near must sit just in front of the planet, not at 5000.
+            nearP = std::max(0.1f, distToCenter - maxR);
+            farP  = distToCenter + maxR;
+        }
+        m_camera.setClip(nearP, farP);
+    } else {
+        m_camera.setClip(0.01f, 10000.0f);                 // editor defaults
+    }
+
+    ubo.projection = m_camera.getProjectionMatrix();
+    if (camRel) {
+        // Build the rotation-only view DIRECTLY from the camera basis with the eye at the
+        // ORIGIN — do NOT strip translation from lookAt(pos, pos+front, up). At planetary
+        // distances (camera ~600k units out) the `pos + front` inside lookAt rounds away
+        // the unit `front`, so the recovered view DIRECTION jittered by degrees each frame
+        // → the whole image shook. From the origin there's no large-magnitude cancellation,
+        // so the orientation is rock-steady; the floating origin already offsets geometry.
+        ubo.view           = glm::lookAt(glm::vec3(0.0f), m_camera.getFront(), m_camera.getUp());
+        ubo.cameraPosition = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    } else {
+        ubo.view           = m_camera.getViewMatrix();
+        ubo.cameraPosition = glm::vec4(camPos, 1.0f);
+    }
+
+    // Third-person see-through is now handled entirely in the renderer: the character is
+    // redrawn where terrain hides it, screen-door dithered (see mesh.frag occludable>2.5
+    // + the overlay pass in Renderer). No per-fragment occluder data needed here.
+    ubo.occluder = glm::vec4(0.0f);   // unused; kept for UBO layout compatibility
 
     // Pull sky + ambient from the singleton EnvironmentComponent. Auto-creates
     // the entity on first call so existing scenes (no env entity saved yet)
@@ -1395,6 +1834,24 @@ void Engine::updateUniformBuffer(uint32_t currentFrame) {
     ubo.skyTop       = glm::vec4(env.skyTop,     1.0f);
     ubo.skyHorizon   = glm::vec4(env.skyHorizon, env.skyIntensity);
     ubo.skyGround    = glm::vec4(env.skyGround,  1.0f);
+
+    // Planet atmosphere: fade the sky gradient (which drives both the visible skybox
+    // and the IBL) toward black space as the camera climbs out of the atmosphere.
+    // On the surface it's the scene's blue sky; in orbit it's near-black with the
+    // planet lit only by the sun — all via the existing sky pipeline, no shader.
+    if (camRel) {
+        float distToCenter = glm::length(camPos - m_planet.center());
+        // Altitude above the LOCAL surface, so the sky stays blue while you're on the
+        // ground (even atop a tall mountain) and only fades to space as you fly up.
+        float altitude = std::max(0.0f, distToCenter - m_planet.surfaceDistance(camPos));
+        float atmH = m_planet.radius() * 0.25f;                 // fly ~375u up → space
+        float t    = glm::clamp(altitude / atmH, 0.0f, 1.0f);   // 0 = surface, 1 = space
+        const glm::vec3 space(0.008f, 0.010f, 0.020f);
+        ubo.skyTop     = glm::vec4(glm::mix(env.skyTop,     space, t), 1.0f);
+        ubo.skyHorizon = glm::vec4(glm::mix(env.skyHorizon, space, t),
+                                   glm::mix(env.skyIntensity, 0.05f, t));
+        ubo.skyGround  = glm::vec4(glm::mix(env.skyGround,  space, t), 1.0f);
+    }
 
     // Sun-shadow light-space matrix: orthographic projection looking along the
     // directional sun's direction. Volume is sized to cover the typical scene (about
@@ -1418,6 +1875,20 @@ void Engine::updateUniformBuffer(uint32_t currentFrame) {
     }
     if (glm::length(sunDir) < 1e-4f) sunDir = glm::vec3(-0.5f, -1.0f, -0.3f);
     sunDir = glm::normalize(sunDir);
+
+    // Planet OVERVIEW: lock the sun to the CAMERA (a fixed 3/4 angle relative to the
+    // view) instead of the world. The camera orbits the planet, so a world-fixed sun
+    // would make the lit side sweep across — making it look like the camera is flying
+    // around. Co-rotating the sun keeps the lighting/terminator static on screen while
+    // the terrain turns past, i.e. it reads as the PLANET spinning under a fixed lamp.
+    const bool overviewSun = m_gameMode && m_planet.active() && !m_planetWalk;
+    if (overviewSun) {
+        glm::vec3 f = m_camera.getFront();
+        glm::vec3 u = m_camera.getUp();
+        glm::vec3 r = glm::normalize(glm::cross(f, u));
+        sunDir = glm::normalize(f * 0.25f - r * 0.80f - u * 0.45f);   // light from upper-right of view
+    }
+
     // Guard the lookAt: a sun pointing straight down (or up) is parallel to the
     // world-up axis, which makes glm::lookAt produce NaNs (gimbal lock). Pick a
     // perpendicular up axis when that's the case.
@@ -1428,6 +1899,9 @@ void Engine::updateUniformBuffer(uint32_t currentFrame) {
     glm::mat4 lightProj = glm::ortho(-8.0f, 8.0f, -8.0f, 8.0f, 0.1f, 50.0f);
     lightProj[1][1] *= -1.0f;                                   // Vulkan Y-flip
     ubo.lightSpace = lightProj * lightView;
+    // Camera-relative: the frag passes camera-relative positions into lightSpace, so
+    // convert them back to world first (translate by +camPos) before the light proj.
+    if (camRel) ubo.lightSpace = ubo.lightSpace * glm::translate(glm::mat4(1.0f), camPos);
 
     // Pack lights from ECS into UBO
     int lightIndex = 0;
@@ -1442,17 +1916,36 @@ void Engine::updateUniformBuffer(uint32_t currentFrame) {
         gpu.params = glm::vec4(lc.radius, -1.0f, 0.0f, 0.0f);
 
         if (lc.type == LightComponent::Type::Directional) {
-            gpu.positionAndType = glm::vec4(glm::normalize(lc.direction), 0.0f);
+            // In the overview, all directional light tracks the camera-locked sun (above)
+            // so the planet reads as spinning under a fixed lamp, not as a flying camera.
+            glm::vec3 d = overviewSun ? sunDir : glm::normalize(lc.direction);
+            gpu.positionAndType = glm::vec4(d, 0.0f);
         } else {
             // Point light — read position from TransformComponent
             glm::vec3 pos{0.0f};
             if (m_registry.has<TransformComponent>(entity)) {
                 pos = m_registry.get<TransformComponent>(entity).position;
             }
+            if (camRel) pos -= camPos;        // shift into camera-relative space
             gpu.positionAndType = glm::vec4(pos, 1.0f);
         }
 
         lightIndex++;
+    }
+    // Planet mode needs a sun: if the scene has no directional light the planet would
+    // be lit only by IBL (near-black in space). Inject a default sun (UBO only, scene
+    // untouched) so the lit hemisphere is always visible.
+    if (camRel && lightIndex < MAX_LIGHTS) {
+        bool hasDir = false;
+        for (int k = 0; k < lightIndex; ++k)
+            if (ubo.lights[k].positionAndType.w < 0.5f) { hasDir = true; break; }
+        if (!hasDir) {
+            GpuLightData& gpu = ubo.lights[lightIndex];
+            gpu.positionAndType   = glm::vec4(sunDir, 0.0f);
+            gpu.colorAndIntensity = glm::vec4(1.0f, 0.98f, 0.95f, 3.0f);
+            gpu.params            = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
+            lightIndex++;
+        }
     }
     ubo.lightCountAndPad = glm::ivec4(lightIndex, 0, 0, 0);
 
@@ -1783,6 +2276,7 @@ void Engine::onViewportRightClick(double mx, double my) {
 }
 
 void Engine::onViewportPress(double mx, double my) {
+    if (m_gameMode) return;            // selection / gizmo is an editor control — never in-game
     GLFWwindow* w = m_window->getHandle();
 
     // 1) Grab a gizmo axis if the click landed near one → drag the whole selection.
@@ -2572,7 +3066,8 @@ void Engine::writeEntities(std::ostream& os, const std::vector<Entity>& ents) {
                << v.skyIntensity << ' '
                << v.ambient.r    << ' ' << v.ambient.g    << ' ' << v.ambient.b    << ' '
                << v.bloomThreshold << ' ' << v.bloomKnee << ' ' << v.bloomStrength << ' '
-               << (int)v.tonemapper << ' ' << v.exposure << "\n";
+               << (int)v.tonemapper << ' ' << v.exposure << ' '
+               << (v.planetActive ? 1 : 0) << ' ' << v.planetSeed << ' ' << v.planetRadius << "\n";
         }
     }
 }
@@ -2740,6 +3235,11 @@ std::vector<Entity> Engine::readEntities(std::istream& is, const glm::vec3& posO
                >> v.bloomThreshold >> v.bloomKnee >> v.bloomStrength
                >> tm >> v.exposure;
             v.tonemapper = static_cast<EnvironmentComponent::Tonemapper>(tm);
+            // Optional trailing planet fields (absent in older scenes → keep defaults).
+            int pa = 0; uint32_t pseed = 0; float prad = 1500.0f;
+            if (ss >> pa)    v.planetActive = (pa != 0);
+            if (ss >> pseed) v.planetSeed   = pseed;
+            if (ss >> prad)  v.planetRadius  = prad;
             m_registry.assign<EnvironmentComponent>(cur, v);
             m_environmentEntity = cur;
         } else if (key == "clip") {
