@@ -19,7 +19,9 @@
 #include "ecs/components/SkinComponent.h"
 #include "ecs/components/EnvironmentComponent.h"
 #include "ecs/systems/TransformSystem.h"
-#include "procgen/Planet.h"
+#ifdef NYX_HAS_PLANET
+#include "procgen/Planet.h"   // project-side planet generator (prim:planet mesh source)
+#endif
 #include <cstdlib>   // std::getenv (dev planet self-test hook)
 
 #include <GLFW/glfw3.h>
@@ -2064,8 +2066,18 @@ Mesh* Engine::resolveMesh(const std::string& source) {
             try { seed = (uint32_t)std::stoul(source.substr(colon + 1)); } catch (...) {}
         }
         std::vector<Vertex> v; std::vector<uint32_t> i;
+#ifdef NYX_HAS_PLANET
         procgen::makePlanet(v, i, seed);
         return m_resourceCache.getOrCreateMesh(m_vulkanContext, source, v, i);
+#else
+        // No project terrain generator compiled in — can't build the planet mesh.
+        // Fall back to a cube so an old scene referencing prim:planet still loads.
+        (void)seed;
+        LOG_WARN("resolveMesh: '{}' requested but planet support is not built "
+                 "(no project procgen/Planet.h); substituting a cube", source);
+        makeCube(v, i);
+        return m_resourceCache.getOrCreateMesh(m_vulkanContext, "prim:cube", v, i);
+#endif
     }
     if (source.rfind("prim:plane", 0) == 0) {
         std::vector<Vertex> v; std::vector<uint32_t> i; makePlane(v, i);

@@ -17,7 +17,9 @@
 // off-screen chunks, and freed meshes go through a frame-tagged deferred-deletion
 // queue so an in-flight command buffer never references destroyed buffers.
 
-#include "procgen/Planet.h"
+#ifdef NYX_HAS_PLANET
+#include "procgen/Planet.h"   // project-side terrain field (only when a project provides it)
+#endif
 #include "renderer/Mesh.h"
 #include "renderer/Buffer.h"
 
@@ -120,7 +122,9 @@ private:
     void  stopWorkers();
 
     VulkanContext* m_ctx = nullptr;
+#ifdef NYX_HAS_PLANET
     std::unique_ptr<procgen::PlanetField> m_field;
+#endif
     glm::vec3 m_center{0.0f};
     float     m_radius = 1.0f;
     glm::vec3 m_camPos{0.0f};      // camera world pos captured at update() (for camera-relative models)

@@ -161,6 +161,14 @@ if(PROJECT_PROCGEN_SOURCES)
     message(STATUS "Nyx: compiling project procgen scripts from ${NYX_PROJECT_DIR}/procgen")
 endif()
 
+# Planet subsystem is OPTIONAL: the engine's src/planet code needs a project-side
+# procgen::PlanetField (procgen/Planet.h). Only enable it when the active project
+# actually provides that header — otherwise the engine builds planet-free (a stock
+# engine has no planet; a project adds one by dropping in procgen/Planet.h + .cpp).
+if(EXISTS "${NYX_PROJECT_DIR}/procgen/Planet.h")
+    set(NYX_HAS_PLANET TRUE)
+endif()
+
 # Project gameplay scripts (C++): everything "in-game" — player controls, character
 # behaviour, game rules — lives in projects/<NYX_PROJECT>/scripts/*.cpp, NOT in the
 # engine. Same compiled-in model as procgen (no runtime scripting). The engine
@@ -169,6 +177,11 @@ file(GLOB PROJECT_GAME_SOURCES CONFIGURE_DEPENDS "${NYX_PROJECT_DIR}/scripts/*.c
 if(PROJECT_GAME_SOURCES)
     list(APPEND ENGINE_SOURCES ${PROJECT_GAME_SOURCES})
     message(STATUS "Nyx: compiling project gameplay scripts from ${NYX_PROJECT_DIR}/scripts")
+else()
+    # No project scripts → link default no-op gameplay hooks so the engine still
+    # builds standalone (a project overrides these by shipping its own scripts/).
+    list(APPEND ENGINE_SOURCES src/game/GameScriptDefault.cpp)
+    message(STATUS "Nyx: no project scripts in '${NYX_PROJECT}' — linking default no-op gameplay hooks")
 endif()
 
 # ── Windows app icon (compiled into the exe; GLFW reads the "GLFW_ICON" resource)
@@ -178,6 +191,14 @@ endif()
 
 # ── Create the executable ───────────────────────────────────────────────────
 add_executable(${PROJECT_NAME} ${ENGINE_SOURCES})
+
+# Gate the planet subsystem (see the NYX_HAS_PLANET detection above).
+if(NYX_HAS_PLANET)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NYX_HAS_PLANET)
+    message(STATUS "Nyx: planet subsystem ENABLED (project '${NYX_PROJECT}' provides procgen/Planet.h)")
+else()
+    message(STATUS "Nyx: planet subsystem DISABLED — no procgen/Planet.h in project '${NYX_PROJECT}'; engine builds planet-free")
+endif()
 
 # ── Include directories ─────────────────────────────────────────────────────
 target_include_directories(${PROJECT_NAME} PRIVATE

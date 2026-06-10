@@ -12,6 +12,13 @@
 #include <algorithm>
 #include <cmath>
 
+// The planet subsystem turns a project-side procgen::PlanetField into terrain.
+// NYX_HAS_PLANET is defined by CMake only when the active project supplies
+// procgen/Planet.h. Without it (a stock engine, no project), the whole
+// implementation below is compiled out and replaced by the inert stubs at the
+// bottom of this file, so the engine builds and runs with no planet at all.
+#ifdef NYX_HAS_PLANET
+
 namespace Nyx {
 
 // ── Cube → sphere ─────────────────────────────────────────────────────────────
@@ -518,3 +525,21 @@ void PlanetSystem::update(const glm::vec3& camPos) {
 }
 
 } // namespace Nyx
+
+#else  // !NYX_HAS_PLANET — no project terrain field; planet support is absent.
+
+namespace Nyx {
+
+// Inert stubs. m_active stays false (its in-class initialiser), so every
+// m_planet.xxx() call site in the engine — all of which guard on active() —
+// short-circuits to the no-planet path. init() never activates the planet.
+void      PlanetSystem::init(VulkanContext&, Descriptors&, ResourceCache&,
+                             uint32_t, const glm::vec3&, float) {}
+void      PlanetSystem::cleanup(VmaAllocator) {}
+void      PlanetSystem::update(const glm::vec3&) {}
+float     PlanetSystem::surfaceDistance(const glm::vec3&) const { return 0.0f; }
+glm::vec3 PlanetSystem::collide(const glm::vec3& worldPos, float) const { return worldPos; }
+
+} // namespace Nyx
+
+#endif // NYX_HAS_PLANET
