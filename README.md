@@ -25,8 +25,8 @@ runtime install needed.
 
 > The prebuilt is a periodic **snapshot** and may lag the latest source. A build
 > from source opens a clean **Environment-only** default scene (sky / IBL, no
-> meshes or lights) — populate it from the hierarchy's create menu, or generate a
-> procedural planet from the dev console (`procgen.planet`).
+> meshes or lights) — populate it from the hierarchy's create menu. (The planet is
+> a project feature and isn't in a stock build; see *Building*.)
 
 To build from source (and edit the engine itself) instead, see below.
 
@@ -40,10 +40,13 @@ To build from source (and edit the engine itself) instead, see below.
 - **Asset pipeline** — glTF (cgltf) and OBJ (tinyobjloader); FBX/COLLADA import
   via Assimp; `stb_image` for textures. Helper Blender conversion scripts
   (`gladconv.py`, `hairconv.py`) for PBR/alpha-cutout assets.
-- **Chunked-LOD planet** — a cube-sphere quadtree streamed on worker threads with
-  LRU eviction, double-precision radial placement, and floating-origin
-  (camera-relative) rendering, so you can go from standing on the surface to
-  seeing the whole planet from space without popping or clipping.
+- **Chunked-LOD planet** *(project feature)* — a cube-sphere quadtree streamed on
+  worker threads with LRU eviction, double-precision radial placement, and
+  floating-origin (camera-relative) rendering, so you can go from standing on the
+  surface to seeing the whole planet from space without popping or clipping. The
+  streaming/rendering is in the engine, but the terrain itself comes from a
+  project-supplied `procgen::PlanetField`; a stock engine has no planet (see
+  *Building* below).
 - **In-engine editor** — ECS scene graph, `.scene` save/load, multi-light setup,
   per-material inspector sliders, full undo/redo, play mode, and project export.
 - **Custom borderless window** — drag/resize, min/max/close, F11 fullscreen.
@@ -79,17 +82,23 @@ open the folder in Visual Studio 2022 — it picks up `CMakePresets.json`.
 
 See [WINDOWS_SETUP.md](WINDOWS_SETUP.md) for the full walkthrough.
 
-### A game project is required to build
+### Game projects (optional)
 
-This repo is **engine-only**, but the engine compiles a game project's C++ in
-directly — there's no runtime scripting. The build globs
-`projects/<NYX_PROJECT>/procgen/*.cpp` and `projects/<NYX_PROJECT>/scripts/*.cpp`
-and adds the project root to the include path, and the planet subsystem
-(`src/planet/PlanetSystem.h`) includes the project's `procgen/Planet.h`. So a
-project supplying those sources must be present at configure time or the build
-won't compile.
+The engine builds and runs **standalone** — no project required. A stock build
+has no planet and no gameplay; a brand-new project opens on a clean
+Environment-only scene you populate yourself.
 
-Select it with the `NYX_PROJECT` cache variable (defaults to `New project`):
+A *project* extends the engine with C++ compiled directly into the build (there's
+no runtime scripting). Drop sources under `projects/<NYX_PROJECT>/` and reconfigure:
+
+- `procgen/Planet.h` + `procgen/*.cpp` — a `procgen::PlanetField` terrain function.
+  When `procgen/Planet.h` is present, CMake defines `NYX_HAS_PLANET` and the
+  chunked-LOD planet subsystem is compiled in; otherwise the engine is planet-free.
+- `scripts/*.cpp` — gameplay hooks (`Nyx::game::onSpawn` / `update`) that drive the
+  player/camera each frame. Absent → the engine links default no-op hooks.
+
+Select the active project with the `NYX_PROJECT` cache variable (defaults to
+`New project`):
 
 ```powershell
 cmake --preset windows-msvc -DNYX_PROJECT="My project"
