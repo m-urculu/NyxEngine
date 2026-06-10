@@ -21,9 +21,11 @@ namespace Nyx {
 struct EnvironmentComponent {
     // ── Sky / IBL — drives the procedural skybox AND the in-shader image-based
     //    lighting. .w on horizon doubles as the overall sky-intensity multiplier.
-    glm::vec3 skyTop      = {0.10f, 0.18f, 0.45f};
-    glm::vec3 skyHorizon  = {1.00f, 0.55f, 0.20f};
-    glm::vec3 skyGround   = {0.05f, 0.04f, 0.03f};
+    //    Neutral grayscale dome by default (white zenith → gray horizon → black
+    //    ground), so a new scene is lit by a colour-free environment light only.
+    glm::vec3 skyTop      = {1.00f, 1.00f, 1.00f};   // white zenith
+    glm::vec3 skyHorizon  = {0.50f, 0.50f, 0.50f};   // gray horizon
+    glm::vec3 skyGround   = {0.00f, 0.00f, 0.00f};   // black ground
     float     skyIntensity = 0.8f;
 
     // ── Ambient floor — a flat additive term, mostly relevant where the sky
