@@ -9,6 +9,22 @@ walk around.
 > Status: a personal/learning project, evolving fast. Native Windows (MSVC) is
 > the primary target.
 
+## Run it instantly (prebuilt, no build needed)
+
+A ready-to-run Windows build of the **engine/editor** is committed under
+[`dist/`](dist/). After cloning, just double-click (Windows x64):
+
+```
+dist\Nyx.exe
+```
+
+It launches the **Nyx editor** with a demo scene already loaded — a procedural
+planet, a light, and the scene hierarchy / inspector / content browser panels.
+The only requirement is a GPU with **Vulkan drivers** (which ship with any
+modern NVIDIA/AMD/Intel driver); no Vulkan SDK or runtime install needed.
+
+To build from source (and edit the engine itself) instead, see below.
+
 ## Features
 
 - **Vulkan renderer** — depth pre-pass, full PBR (albedo / normal / roughness /
