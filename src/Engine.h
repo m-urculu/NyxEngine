@@ -299,7 +299,10 @@ private:
     // through the inspector / picker. Cheap (one memcpy per light).
     void      syncLightGizmoColors();
     void updateUniformBuffer(uint32_t currentFrame);
-    void buildDemoScene();
+    // Seed a brand-new project's scene. Intentionally minimal: only the
+    // Environment (sky/IBL/ambient) entity, no lights or meshes — a clean
+    // slate the user populates themselves.
+    void buildDefaultScene();
     // Load every primitive of a glTF as entities at `position`; returns the first.
     Entity loadGltfScene(const std::string& filepath, const glm::vec3& position = {0.0f, 1.5f, -2.0f},
                          float rootScale = 1.0f);

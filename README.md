@@ -18,8 +18,10 @@ A ready-to-run Windows build of the **engine/editor** is committed under
 dist\Nyx.exe
 ```
 
-It launches the **Nyx editor** with a demo scene already loaded — a procedural
-planet, a light, and the scene hierarchy / inspector / content browser panels.
+It launches the **Nyx editor** on a clean default scene — just the Environment
+(sky / IBL) entity and the scene hierarchy / inspector / content browser panels,
+ready for you to build in. Add objects and lights from the hierarchy's create
+menu, or generate a procedural planet from the dev console (`procgen.planet`).
 The only requirement is a GPU with **Vulkan drivers** (which ship with any
 modern NVIDIA/AMD/Intel driver); no Vulkan SDK or runtime install needed.
 

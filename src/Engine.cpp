@@ -764,11 +764,10 @@ void Engine::init(StatusFn onStatus) {
 
     m_time.init();
 
-    // Load the project's saved scene if one exists; otherwise seed the demo scene
-    // (lights + sample cubes) + mount the gladiator fresh so a brand-new project
-    // isn't empty. The saved scene is authoritative — once you Save Scene, your
-    // saved state is what loads, including the gladiator with full PBR maps and
-    // any transforms you've applied (.scene round-trips materials losslessly).
+    // Load the project's saved scene if one exists; otherwise seed a clean
+    // default scene (Environment only). The saved scene is authoritative — once
+    // you Save Scene, your saved state is what loads, including any models with
+    // full PBR maps and transforms (.scene round-trips materials losslessly).
     {
         // Game mode loads the exact scene the editor handed us; otherwise the
         // project's saved scene.
@@ -779,13 +778,8 @@ void Engine::init(StatusFn onStatus) {
             status("Loading scene...", 0.65f);
             loadScene(projectScene);
         } else {
-            status("Building demo scene...", 0.65f);
-            buildDemoScene();
-            std::string gp = m_projectPath + "/assets/models/Gladiator/Gladiator.gltf";
-            if (std::filesystem::exists(gp)) {
-                status("Loading model: Gladiator...", 0.75f);
-                loadGltfScene(gp, {0.0f, 0.0f, -2.0f}, 1.5f);
-            }
+            status("Building default scene...", 0.65f);
+            buildDefaultScene();
         }
     }
 
@@ -1858,9 +1852,10 @@ void Engine::updateUniformBuffer(uint32_t currentFrame) {
     // the gladiator + small surroundings). With GLM_FORCE_DEPTH_ZERO_TO_ONE the proj
     // returns Vulkan-compatible z [0,1]; we Y-flip so shadow UVs match the renderer's
     // convention.
-    // Resolve the sun direction. m_sunEntity gets set in buildDemoScene but a
-    // .scene file load doesn't tag a specific entity as the sun — fall back to
-    // the first directional light in the registry so loaded scenes still cast.
+    // Resolve the sun direction. A .scene file load doesn't tag a specific
+    // entity as the sun (and a fresh project has no directional light at all) —
+    // fall back to the first directional light in the registry, if any, so
+    // loaded scenes still cast. m_sunEntity stays valid only if something set it.
     glm::vec3 sunDir(-0.5f, -1.0f, -0.3f);
     if (m_sunEntity != NULL_ENTITY && m_registry.has<LightComponent>(m_sunEntity)) {
         sunDir = m_registry.get<LightComponent>(m_sunEntity).direction;
@@ -2500,81 +2495,14 @@ void Engine::updateGizmo(float winW, float winH, bool cursorActive) {
     m_gizmo.update(m_gizmoVisible, m_gizmoOrigin, m_gizmoTip, hoverAxis, marqueeActive, mq0, mq1, outlines, lightIcons);
 }
 
-void Engine::buildDemoScene() {
-    Texture* defaultTex = m_resourceCache.getDefaultTexture();
+void Engine::buildDefaultScene() {
+    // A brand-new project opens as a clean slate: only the Environment
+    // (sky / IBL / ambient) entity, no lights or meshes. The user adds their
+    // own content via the hierarchy's create menu and the content browser.
+    // Sky IBL still lights anything they add, so the viewport isn't black.
+    ensureEnvironmentEntity();
 
-    // === Lights ===
-
-    // Directional sun light
-    {
-        m_sunEntity = m_registry.createEntity();
-        LightComponent lc{};
-        lc.type      = LightComponent::Type::Directional;
-        lc.color     = {1.0f, 1.0f, 0.95f};
-        lc.intensity = 1.0f;
-        lc.direction = glm::normalize(glm::vec3(-0.5f, -1.0f, -0.3f));
-        m_registry.assign<LightComponent>(m_sunEntity, lc);
-    }
-
-    // Point light 1 — warm, near the cube
-    {
-        m_pointLightEntity = m_registry.createEntity();
-        TransformComponent tc{};
-        tc.position = {3.0f, 2.0f, 1.0f};
-        m_registry.assign<TransformComponent>(m_pointLightEntity, tc);
-
-        LightComponent lc{};
-        lc.type      = LightComponent::Type::Point;
-        lc.color     = {1.0f, 0.7f, 0.3f};
-        lc.intensity = 2.0f;
-        lc.radius    = 8.0f;
-        m_registry.assign<LightComponent>(m_pointLightEntity, lc);
-    }
-
-    // Point light 2 — cool blue, opposite side
-    {
-        m_pointLightEntity2 = m_registry.createEntity();
-        TransformComponent tc{};
-        tc.position = {-3.0f, 1.5f, -2.0f};
-        m_registry.assign<TransformComponent>(m_pointLightEntity2, tc);
-
-        LightComponent lc{};
-        lc.type      = LightComponent::Type::Point;
-        lc.color     = {0.3f, 0.5f, 1.0f};
-        lc.intensity = 1.5f;
-        lc.radius    = 8.0f;
-        m_registry.assign<LightComponent>(m_pointLightEntity2, lc);
-    }
-
-    // === Geometry ===
-
-    const std::string cubeSrc = "obj:" + m_projectPath + "/assets/models/cube.obj";
-
-    // 1. OBJ Cube
-    Mesh* cubeMesh = resolveMesh(cubeSrc);
-    Entity cube = createMeshEntity(cubeMesh, defaultTex, {0.0f, 0.5f, 0.0f}, {1,1,1}, {1,1,1,1}, 0.0f, 0.5f, cubeSrc);
-
-    // 2. Orbiting child cube
-    m_orbitEntity = createMeshEntity(cubeMesh, defaultTex, {2.5f, 0.5f, 0.0f}, {0.5f, 0.5f, 0.5f}, {1,1,1,1}, 0.0f, 0.5f, cubeSrc);
-    m_registry.get<TransformComponent>(m_orbitEntity).parent = cube;
-
-    // 3. Floor — dark plane so highlights and bloom bleed have something to read
-    //    against (light grey floor washed bloom out under the bright sky IBL).
-    Mesh* planeMesh = resolveMesh("prim:plane");
-    createMeshEntity(planeMesh, defaultTex, {0.0f, 0.0f, 0.0f}, {10.0f, 1.0f, 10.0f},
-                     {0.10f, 0.10f, 0.11f, 1.0f}, 0.0f, 0.8f, "prim:plane");
-
-    // (Note: the demo no longer auto-loads test glTFs like DamagedHelmet/BoxTextured —
-    // those were a legacy "load any model in assets/" path that, after the gladiator
-    // was added as a dedicated mount in init(), spawned the DamagedHelmet right inside
-    // the gladiator's torso and looked like a chrome bubble in the chest. The dedicated
-    // glTF mount in Engine::init handles the hero asset; ad-hoc test models can be
-    // dragged in via the content browser.)
-
-    // Add the sphere gizmo to every point light so they're visible in the viewport.
-    attachLightGizmos();
-
-    LOG_INFO("Demo scene built with {} entities", m_registry.pool<MeshComponent>().size());
+    LOG_INFO("Default scene built (Environment only)");
 }
 
 Entity Engine::loadGltfScene(const std::string& filepath, const glm::vec3& position, float rootScale) {
@@ -4180,13 +4108,8 @@ void Engine::switchProject(const std::string& newPath) {
         status("Loading scene...", 0.5f);
         loadScene(projectScene);
     } else {
-        status("Building demo scene...", 0.5f);
-        buildDemoScene();
-        std::string gp = m_projectPath + "/assets/models/Gladiator/Gladiator.gltf";
-        if (fs::exists(gp)) {
-            status("Loading model: Gladiator...", 0.7f);
-            loadGltfScene(gp, {0.0f, 0.0f, -2.0f}, 1.5f);
-        }
+        status("Building default scene...", 0.5f);
+        buildDefaultScene();
     }
     status("Restoring undo history...", 0.95f);
     loadUndoHistoryFromDisk();
