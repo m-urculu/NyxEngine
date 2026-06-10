@@ -18,12 +18,15 @@ A ready-to-run Windows build of the **engine/editor** is committed under
 dist\Nyx.exe
 ```
 
-It launches the **Nyx editor** on a clean default scene — just the Environment
-(sky / IBL) entity and the scene hierarchy / inspector / content browser panels,
-ready for you to build in. Add objects and lights from the hierarchy's create
-menu, or generate a procedural planet from the dev console (`procgen.planet`).
-The only requirement is a GPU with **Vulkan drivers** (which ship with any
-modern NVIDIA/AMD/Intel driver); no Vulkan SDK or runtime install needed.
+It launches the **Nyx editor** with the scene hierarchy / inspector / content
+browser panels, ready to use. The only requirement is a GPU with **Vulkan
+drivers** (which ship with any modern NVIDIA/AMD/Intel driver); no Vulkan SDK or
+runtime install needed.
+
+> The prebuilt is a periodic **snapshot** and may lag the latest source. A build
+> from source opens a clean **Environment-only** default scene (sky / IBL, no
+> meshes or lights) — populate it from the hierarchy's create menu, or generate a
+> procedural planet from the dev console (`procgen.planet`).
 
 To build from source (and edit the engine itself) instead, see below.
 
@@ -75,6 +78,24 @@ The build also compiles `shaders/*.vert|frag` to `.spv` automatically. Or just
 open the folder in Visual Studio 2022 — it picks up `CMakePresets.json`.
 
 See [WINDOWS_SETUP.md](WINDOWS_SETUP.md) for the full walkthrough.
+
+### A game project is required to build
+
+This repo is **engine-only**, but the engine compiles a game project's C++ in
+directly — there's no runtime scripting. The build globs
+`projects/<NYX_PROJECT>/procgen/*.cpp` and `projects/<NYX_PROJECT>/scripts/*.cpp`
+and adds the project root to the include path, and the planet subsystem
+(`src/planet/PlanetSystem.h`) includes the project's `procgen/Planet.h`. So a
+project supplying those sources must be present at configure time or the build
+won't compile.
+
+Select it with the `NYX_PROJECT` cache variable (defaults to `New project`):
+
+```powershell
+cmake --preset windows-msvc -DNYX_PROJECT="My project"
+```
+
+Projects ship separately from the engine (see *Repository layout* below).
 
 ## Dependencies
 
